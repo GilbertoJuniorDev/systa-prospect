@@ -1,0 +1,25 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model Empresa {
+  cnpj_base         String  @id @db.VarChar(8)
+  razao_social      String
+  natureza_juridica String  @db.VarChar(4)
+  qualificacao_resp String  @db.VarChar(2)
+  capital_social    Float
+  porte             String  @db.VarChar(2)
+  ente_federativo   String?
+
+  // Índice criado via SQL pós-ingestão para não impactar a performance da carga
+  // CREATE INDEX idx_razao_social_trgm ON "Empresa" USING gin (razao_social gin_trgm_ops);
+  @@map("Empresa")
+}
