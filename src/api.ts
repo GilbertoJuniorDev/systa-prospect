@@ -328,7 +328,9 @@ app.setErrorHandler((error: Error & { statusCode?: number }, _request, reply) =>
 async function start(): Promise<void> {
   try {
     await app.register(helmet);
-    await app.register(cors, { origin: false });
+    await app.register(cors, {
+      origin: process.env.APP_FRONTEND_URL ?? 'http://localhost:3001',
+    });
     await app.register(rateLimit, { max: 60, timeWindow: '1 minute' });
     await app.register(authRoutes, { prefix: '/auth' });
     await app.listen({ port: PORT, host: '0.0.0.0' });

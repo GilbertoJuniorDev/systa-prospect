@@ -15,10 +15,10 @@ function createTransporter() {
 export async function sendPasswordResetEmail(
   to: string,
   resetUrl: string,
-): Promise<void> {
+): Promise<string | false> {
   const transporter = createTransporter();
 
-  await transporter.sendMail({
+  const info = await transporter.sendMail({
     from: process.env.SMTP_FROM,
     to,
     subject: 'Redefinição de senha — Systa',
@@ -40,4 +40,6 @@ export async function sendPasswordResetEmail(
       </div>
     `,
   });
+
+  return nodemailer.getTestMessageUrl(info);
 }

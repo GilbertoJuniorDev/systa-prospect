@@ -97,7 +97,10 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
       const resetUrl = `${process.env.APP_FRONTEND_URL}/reset-password?token=${raw}&email=${encodeURIComponent(email)}`;
 
       try {
-        await sendPasswordResetEmail(email, resetUrl);
+        const previewUrl = await sendPasswordResetEmail(email, resetUrl);
+        if (previewUrl) {
+          app.log.info({ previewUrl }, 'Ethereal preview URL');
+        }
       } catch (err) {
         app.log.error({ err }, 'Failed to send password reset email');
       }
