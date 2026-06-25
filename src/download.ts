@@ -2,12 +2,18 @@ import https from 'https';
 import http from 'http';
 import fs from 'fs';
 import path from 'path';
+import unzipper from 'unzipper';
 
-const SHARE_TOKEN = 'YggdBLfdninEJX9';
+const SHARE_TOKEN = process.env.SHARE_TOKEN;
+if (!SHARE_TOKEN) {
+  console.error('FATAL: variável de ambiente SHARE_TOKEN não definida.');
+  process.exit(1);
+}
+const AUTH = Buffer.from(`${SHARE_TOKEN}:`).toString('base64');
+
 const DIR = '2026-06';
 const TEMP_DIR = path.resolve('./temp');
 const WEBDAV_URL = `https://arquivos.receitafederal.gov.br/public.php/webdav/${DIR}/`;
-const AUTH = Buffer.from(`${SHARE_TOKEN}:`).toString('base64');
 const MB = 1_000_000;
 
 interface Arquivo {
@@ -55,7 +61,6 @@ async function listarArquivos(): Promise<Arquivo[]> {
     throw new Error(`PROPFIND retornou HTTP ${resp.status}. Verifique o token e o diretório.`);
   }
 
-  // Parse the XML without external dependencies
   const arquivos: Arquivo[] = [];
   const blocos = resp.body.match(/<[Dd]:response[\s\S]*?<\/[Dd]:response>/g) ?? [];
 
@@ -64,7 +69,6 @@ async function listarArquivos(): Promise<Arquivo[]> {
     const sizeMatch = bloco.match(/<[Dd]:getcontentlength>(\d+)<\/[Dd]:getcontentlength>/);
     const nameMatch = bloco.match(/<[Dd]:displayname>([^<]*)<\/[Dd]:displayname>/);
 
-    // Directories don't have getcontentlength
     if (!hrefMatch || !sizeMatch) continue;
 
     const href = decodeURIComponent(hrefMatch[1].trim());
@@ -81,7 +85,13 @@ async function listarArquivos(): Promise<Arquivo[]> {
 
 function baixarArquivo(arquivo: Arquivo): Promise<void> {
   return new Promise((resolve, reject) => {
-    const destino = path.join(TEMP_DIR, arquivo.nome);
+    const nomeSanitizado = path.basename(arquivo.nome);
+    if (!nomeSanitizado || nomeSanitizado !== arquivo.nome || nomeSanitizado.includes('\0')) {
+      reject(new Error(`Nome de arquivo inválido: ${arquivo.nome}`));
+      return;
+    }
+
+    const destino = path.join(TEMP_DIR, nomeSanitizado);
 
     if (fs.existsSync(destino)) {
       const tamanhoLocal = fs.statSync(destino).size;
@@ -154,6 +164,29 @@ function baixarArquivo(arquivo: Arquivo): Promise<void> {
   });
 }
 
+function descompactarArquivo(nomeZip: string): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const zipPath = path.join(TEMP_DIR, nomeZip);
+
+    const MAX_ZIP_SIZE = 20 * 1024 * 1024 * 1024; // 20 GB
+    const stat = fs.statSync(zipPath);
+    if (stat.size > MAX_ZIP_SIZE) {
+      reject(new Error(`Arquivo ZIP excede o limite de 20 GB: ${nomeZip}`));
+      return;
+    }
+
+    console.log(`[UNZIP] ${nomeZip}`);
+
+    fs.createReadStream(zipPath)
+      .pipe(unzipper.Extract({ path: TEMP_DIR }))
+      .on('close', () => {
+        console.log(`[UNZIP OK] ${nomeZip}`);
+        resolve();
+      })
+      .on('error', reject);
+  });
+}
+
 async function main() {
   if (!fs.existsSync(TEMP_DIR)) fs.mkdirSync(TEMP_DIR, { recursive: true });
 
@@ -169,7 +202,25 @@ async function main() {
   console.log(`${arquivos.length} arquivo(s) — ${totalMB.toFixed(0)} MB total\n`);
 
   for (const arquivo of arquivos) {
+    const ehZip = arquivo.nome.toLowerCase().endsWith('.zip');
+    const markerPath = path.join(TEMP_DIR, `${arquivo.nome}.done`);
+
+    if (ehZip && fs.existsSync(markerPath)) {
+      console.log(`[DONE]  ${arquivo.nome} (já extraído)`);
+      continue;
+    }
+
     await baixarArquivo(arquivo);
+
+    if (ehZip) {
+      await descompactarArquivo(arquivo.nome);
+
+      const zipPath = path.join(TEMP_DIR, arquivo.nome);
+      fs.unlinkSync(zipPath);
+      console.log(`[DEL]   ${arquivo.nome}`);
+
+      fs.writeFileSync(markerPath, '');
+    }
   }
 
   console.log('\nConcluído. Execute "npm run ingest" para processar os dados.');

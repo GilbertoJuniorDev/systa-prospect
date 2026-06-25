@@ -1,6 +1,3 @@
-// This is your Prisma schema file,
-// learn more about it in the docs: https://pris.ly/d/prisma-schema
-
 generator client {
   provider = "prisma-client-js"
 }
@@ -19,7 +16,136 @@ model Empresa {
   porte             String  @db.VarChar(2)
   ente_federativo   String?
 
-  // Índice criado via SQL pós-ingestão para não impactar a performance da carga
-  // CREATE INDEX idx_razao_social_trgm ON "Empresa" USING gin (razao_social gin_trgm_ops);
   @@map("Empresa")
+}
+
+model Estabelecimento {
+  cnpj_base                   String  @db.VarChar(8)
+  cnpj_ordem                  String  @db.VarChar(4)
+  cnpj_dv                     String  @db.VarChar(2)
+  identificador_matriz_filial  String  @db.VarChar(1)
+  nome_fantasia               String?
+  situacao_cadastral          String  @db.VarChar(2)
+  data_situacao_cadastral     String? @db.VarChar(8)
+  motivo_situacao_cadastral   String? @db.VarChar(2)
+  nome_cidade_exterior        String?
+  pais                        String? @db.VarChar(3)
+  data_inicio_atividade       String? @db.VarChar(8)
+  cnae_fiscal_principal       String? @db.VarChar(7)
+  cnae_fiscal_secundaria      String?
+  tipo_logradouro             String?
+  logradouro                  String?
+  numero                      String?
+  complemento                 String?
+  bairro                      String?
+  cep                         String? @db.VarChar(8)
+  uf                          String? @db.VarChar(2)
+  municipio                   String? @db.VarChar(4)
+  ddd1                        String? @db.VarChar(4)
+  telefone1                   String? @db.VarChar(9)
+  ddd2                        String? @db.VarChar(4)
+  telefone2                   String? @db.VarChar(9)
+  ddd_fax                     String? @db.VarChar(4)
+  fax                         String? @db.VarChar(9)
+  correio_eletronico          String?
+  situacao_especial           String?
+  data_situacao_especial      String? @db.VarChar(8)
+
+  @@id([cnpj_base, cnpj_ordem, cnpj_dv])
+  @@map("Estabelecimento")
+}
+
+model Socio {
+  id                         BigInt  @id @default(autoincrement())
+  cnpj_base                  String  @db.VarChar(8)
+  identificador_socio        String  @db.VarChar(1)
+  nome_socio                 String?
+  cnpj_cpf_socio             String? @db.VarChar(14)
+  qualificacao_socio         String? @db.VarChar(2)
+  data_entrada_sociedade     String? @db.VarChar(8)
+  pais                       String? @db.VarChar(3)
+  representante_legal        String? @db.VarChar(11)
+  nome_representante         String?
+  qualificacao_representante String? @db.VarChar(2)
+  faixa_etaria               String? @db.VarChar(1)
+
+  @@map("Socio")
+}
+
+model Simples {
+  cnpj_base             String  @id @db.VarChar(8)
+  opcao_simples         String? @db.VarChar(1)
+  data_opcao_simples    String? @db.VarChar(8)
+  data_exclusao_simples String? @db.VarChar(8)
+  opcao_mei             String? @db.VarChar(1)
+  data_opcao_mei        String? @db.VarChar(8)
+  data_exclusao_mei     String? @db.VarChar(8)
+
+  @@map("Simples")
+}
+
+model Cnae {
+  codigo    String @id @db.VarChar(7)
+  descricao String
+
+  @@map("Cnae")
+}
+
+model Motivo {
+  codigo    String @id @db.VarChar(2)
+  descricao String
+
+  @@map("Motivo")
+}
+
+model Municipio {
+  codigo    String @id @db.VarChar(4)
+  descricao String
+
+  @@map("Municipio")
+}
+
+model Natureza {
+  codigo    String @id @db.VarChar(4)
+  descricao String
+
+  @@map("Natureza")
+}
+
+model Pais {
+  codigo    String @id @db.VarChar(3)
+  descricao String
+
+  @@map("Pais")
+}
+
+model Qualificacao {
+  codigo    String @id @db.VarChar(2)
+  descricao String
+
+  @@map("Qualificacao")
+}
+
+model User {
+  id                  String               @id @default(cuid())
+  email               String               @unique
+  passwordHash        String
+  name                String?
+  createdAt           DateTime             @default(now())
+  updatedAt           DateTime             @updatedAt
+  passwordResetTokens PasswordResetToken[]
+
+  @@map("User")
+}
+
+model PasswordResetToken {
+  id        String    @id @default(cuid())
+  tokenHash String    @unique
+  userId    String
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  expiresAt DateTime
+  usedAt    DateTime?
+  createdAt DateTime  @default(now())
+
+  @@map("PasswordResetToken")
 }
