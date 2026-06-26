@@ -52,6 +52,8 @@ model Estabelecimento {
   data_situacao_especial      String? @db.VarChar(8)
 
   @@id([cnpj_base, cnpj_ordem, cnpj_dv])
+  @@index([uf, municipio], name: "Estabelecimento_uf_municipio_idx")
+  @@index([uf, cnae_fiscal_principal], name: "Estabelecimento_uf_cnae_idx")
   @@map("Estabelecimento")
 }
 
