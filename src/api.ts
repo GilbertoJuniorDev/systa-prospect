@@ -1,3 +1,4 @@
+/// <reference path="./types/fastify.d.ts" />
 import 'dotenv/config';
 import Fastify from 'fastify';
 import { Prisma } from '@prisma/client';
@@ -7,7 +8,10 @@ import cors from '@fastify/cors';
 import { prisma } from './lib/prisma';
 import { authRoutes } from './routes/auth';
 import { consultaRoutes } from './routes/consulta';
+import { creditsRoutes } from './routes/credits';
 import { SITUACAO_MAP, formatFone, formatCNPJ, formatCEP } from './lib/formatters';
+import { authenticate } from './lib/authenticate';
+import { deductCredits } from './lib/credits';
 
 if (!process.env.DATABASE_URL) {
   console.error('FATAL: variável DATABASE_URL não definida.');
@@ -202,6 +206,7 @@ app.get<{ Querystring: { nome?: string; limite?: string } }>(
 
 app.get<{ Params: { cnpj: string } }>(
   '/cnpj/:cnpj',
+  { preHandler: [authenticate] },
   async (request, reply) => {
     const cnpj = request.params.cnpj.replace(/\D/g, '');
 
@@ -350,6 +355,15 @@ app.get<{ Params: { cnpj: string } }>(
       return reply.status(404).send({ error: 'CNPJ não encontrado.' });
     }
 
+    const credited = await deductCredits(
+      request.user.userId,
+      1,
+      'CNPJ_QUERY',
+      'Consulta CNPJ ' + cnpj,
+      reply,
+    );
+    if (!credited) return;
+
     const r = rows[0];
 
     const codigosSecundarios: string[] = r.cnae_fiscal_secundaria
@@ -480,6 +494,7 @@ async function start(): Promise<void> {
     await app.register(rateLimit, { max: 60, timeWindow: '1 minute' });
     await app.register(authRoutes, { prefix: '/auth' });
     await app.register(consultaRoutes);
+    await app.register(creditsRoutes);
     await app.listen({ port: PORT, host: '0.0.0.0' });
   } catch (err) {
     app.log.error(err);

@@ -135,9 +135,40 @@ model User {
   name                String?
   createdAt           DateTime             @default(now())
   updatedAt           DateTime             @updatedAt
+  credits             Int                  @default(10)
   passwordResetTokens PasswordResetToken[]
+  creditTransactions  CreditTransaction[]
+  consultaCaches      ConsultaCache[]
 
   @@map("User")
+}
+
+model ConsultaCache {
+  id         String   @id @default(cuid())
+  userId     String
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  paramsHash String
+  params     Json
+  total      Int
+  expiresAt  DateTime
+  createdAt  DateTime @default(now())
+
+  @@unique([userId, paramsHash])
+  @@map("ConsultaCache")
+}
+
+model CreditTransaction {
+  id              String   @id @default(cuid())
+  userId          String
+  user            User     @relation(fields: [userId], references: [id])
+  amount          Int
+  type            String
+  description     String?
+  stripeSessionId String?
+  paramsHash      String?
+  createdAt       DateTime @default(now())
+
+  @@map("CreditTransaction")
 }
 
 model PasswordResetToken {

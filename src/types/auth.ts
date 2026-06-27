@@ -17,3 +17,9 @@ export interface AuthTokenResponse {
   accessToken: string;
   expiresIn: number;
 }
+
+export interface RegisterBody {
+  email: string;
+  password: string;
+  name?: string;
+}

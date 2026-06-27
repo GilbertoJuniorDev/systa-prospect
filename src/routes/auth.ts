@@ -10,6 +10,7 @@ import { sendPasswordResetEmail } from '../services/email.service';
 import {
   ForgotPasswordBody,
   LoginBody,
+  RegisterBody,
   ResetPasswordBody,
 } from '../types/auth';
 import bcrypt from 'bcrypt';
@@ -168,6 +169,59 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
       });
 
       return reply.send({ message: 'Password updated' });
+    },
+  );
+
+  app.post<{ Body: RegisterBody }>(
+    '/register',
+    {
+      config: { rateLimit: { max: 5, timeWindow: '1 hour' } },
+      schema: {
+        body: {
+          type: 'object',
+          required: ['email', 'password'],
+          properties: {
+            email: { type: 'string', format: 'email' },
+            password: { type: 'string', minLength: 8 },
+            name: { type: 'string' },
+          },
+        },
+      },
+    },
+    async (
+      request: FastifyRequest<{ Body: RegisterBody }>,
+      reply: FastifyReply,
+    ) => {
+      const { email, password, name } = request.body;
+
+      const existing = await prisma.user.findUnique({ where: { email } });
+      if (existing) {
+        return reply.code(409).send({ error: 'email_already_exists' });
+      }
+
+      const initialCredits = Number(process.env.INITIAL_CREDITS ?? 10);
+      const passwordHash = await hashPassword(password);
+
+      const user = await prisma.user.create({
+        data: {
+          email,
+          passwordHash,
+          name,
+          credits: initialCredits,
+          creditTransactions: {
+            create: {
+              amount: initialCredits,
+              type: 'REGISTER_BONUS',
+              description: 'Bônus de cadastro',
+            },
+          },
+        },
+      });
+
+      const accessToken = signAccessToken({ userId: user.id, email: user.email });
+      const expiresIn = Number(process.env.JWT_EXPIRY_SECONDS ?? 86400);
+
+      return reply.code(201).send({ accessToken, expiresIn });
     },
   );
 }

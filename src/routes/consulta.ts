@@ -1,8 +1,11 @@
+import crypto from 'node:crypto';
 import type { FastifyInstance } from 'fastify';
 import { Prisma } from '@prisma/client';
 import ExcelJS from 'exceljs';
 import { prisma } from '../lib/prisma';
 import { SITUACAO_MAP, PORTE_MAP, formatCNPJ, formatCEP, formatFone, formatDate } from '../lib/formatters';
+import { authenticate } from '../lib/authenticate';
+import { deductCredits, addCredits } from '../lib/credits';
 
 const MAX_EXPORT_ROWS = parseInt(process.env.MAX_EXPORT_ROWS ?? '200000', 10);
 
@@ -77,6 +80,19 @@ function buildConsultaWhere(body: ConsultaBody): Prisma.Sql {
       ${situacaoClause}
       ${meiClause}
   `;
+}
+
+const CACHE_TTL_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
+
+function buildParamsHash(body: ConsultaBody): string {
+  const normalized = {
+    cnaes: [...body.cnaes].sort(),
+    uf: body.uf,
+    municipios: body.municipios ? [...body.municipios].sort() : [],
+    situacao: body.situacao,
+    mei: body.mei,
+  };
+  return crypto.createHash('sha256').update(JSON.stringify(normalized)).digest('hex');
 }
 
 function validateBody(body: ConsultaBody): string | null {
@@ -190,6 +206,7 @@ export async function consultaRoutes(app: FastifyInstance) {
     '/consulta/exportar',
     {
       config: { rateLimit: { max: 5, timeWindow: '1 minute' } },
+      preHandler: [authenticate],
     },
     async (request, reply) => {
       const body = request.body;
@@ -221,140 +238,183 @@ export async function consultaRoutes(app: FastifyInstance) {
         });
       }
 
-      const rows = await prisma.$transaction(async (tx) => {
-        await tx.$executeRaw`SET LOCAL work_mem = '32MB'`;
-        return tx.$queryRaw<ConsultaRow[]>`
-          SELECT
-            e.cnpj_base, e.cnpj_ordem, e.cnpj_dv,
-            e.identificador_matriz_filial,
-            emp.razao_social, e.nome_fantasia,
-            e.cnae_fiscal_principal,
-            cn.descricao AS cnae_descricao,
-            e.cnae_fiscal_secundaria,
-            e.situacao_cadastral,
-            e.data_situacao_cadastral,
-            e.data_inicio_atividade,
-            e.uf,
-            m.descricao AS municipio_nome,
-            e.tipo_logradouro, e.logradouro, e.numero, e.complemento,
-            e.bairro, e.cep,
-            e.ddd1, e.telefone1,
-            e.ddd2, e.telefone2,
-            e.correio_eletronico,
-            emp.porte,
-            emp.capital_social,
-            nat.descricao AS natureza_juridica,
-            s.opcao_simples,
-            s.opcao_mei,
-            (
-              SELECT STRING_AGG(soc.nome_socio, ' | ' ORDER BY soc.nome_socio)
-              FROM "Socio" soc
-              WHERE soc.cnpj_base = e.cnpj_base
-            ) AS socios
-          FROM "Estabelecimento" e
-          LEFT JOIN "Empresa" emp ON emp.cnpj_base = e.cnpj_base
-          LEFT JOIN "Simples" s ON s.cnpj_base = e.cnpj_base
-          LEFT JOIN "Municipio" m ON m.codigo = e.municipio
-          LEFT JOIN "Cnae" cn ON cn.codigo = e.cnae_fiscal_principal
-          LEFT JOIN "Natureza" nat ON nat.codigo = emp.natureza_juridica
-          ${where}
-          ORDER BY emp.razao_social
-        `;
+      // Check cache: same user + same filters within 30 days = no credit charge
+      const paramsHash = buildParamsHash(body);
+      const now = new Date();
+      const cached = await prisma.consultaCache.findUnique({
+        where: { userId_paramsHash: { userId: request.user.userId, paramsHash } },
       });
+      const isCached = cached !== null && cached.expiresAt > now;
 
-      const workbook = new ExcelJS.Workbook();
-      workbook.creator = 'Systa';
-      workbook.created = new Date();
+      let exportCost = 0;
+      if (!isCached) {
+        exportCost = Math.max(1, Math.ceil(total / 1000));
+        const credited = await deductCredits(
+          request.user.userId,
+          exportCost,
+          'EXPORT',
+          `Exportação de ${total.toLocaleString('pt-BR')} registros`,
+          reply,
+          paramsHash,
+        );
+        if (!credited) return;
+      }
 
-      const sheet = workbook.addWorksheet('Estabelecimentos');
+      let buffer: ArrayBuffer;
+      try {
+        const rows = await prisma.$transaction(async (tx) => {
+          await tx.$executeRaw`SET LOCAL work_mem = '32MB'`;
+          return tx.$queryRaw<ConsultaRow[]>`
+            SELECT
+              e.cnpj_base, e.cnpj_ordem, e.cnpj_dv,
+              e.identificador_matriz_filial,
+              emp.razao_social, e.nome_fantasia,
+              e.cnae_fiscal_principal,
+              cn.descricao AS cnae_descricao,
+              e.cnae_fiscal_secundaria,
+              e.situacao_cadastral,
+              e.data_situacao_cadastral,
+              e.data_inicio_atividade,
+              e.uf,
+              m.descricao AS municipio_nome,
+              e.tipo_logradouro, e.logradouro, e.numero, e.complemento,
+              e.bairro, e.cep,
+              e.ddd1, e.telefone1,
+              e.ddd2, e.telefone2,
+              e.correio_eletronico,
+              emp.porte,
+              emp.capital_social,
+              nat.descricao AS natureza_juridica,
+              s.opcao_simples,
+              s.opcao_mei,
+              (
+                SELECT STRING_AGG(soc.nome_socio, ' | ' ORDER BY soc.nome_socio)
+                FROM "Socio" soc
+                WHERE soc.cnpj_base = e.cnpj_base
+              ) AS socios
+            FROM "Estabelecimento" e
+            LEFT JOIN "Empresa" emp ON emp.cnpj_base = e.cnpj_base
+            LEFT JOIN "Simples" s ON s.cnpj_base = e.cnpj_base
+            LEFT JOIN "Municipio" m ON m.codigo = e.municipio
+            LEFT JOIN "Cnae" cn ON cn.codigo = e.cnae_fiscal_principal
+            LEFT JOIN "Natureza" nat ON nat.codigo = emp.natureza_juridica
+            ${where}
+            ORDER BY emp.razao_social
+          `;
+        });
 
-      sheet.columns = [
-        { header: 'CNPJ', key: 'cnpj', width: 22 },
-        { header: 'Razão Social', key: 'razao_social', width: 42 },
-        { header: 'Nome Fantasia', key: 'nome_fantasia', width: 32 },
-        { header: 'Matriz/Filial', key: 'matriz_filial', width: 14 },
-        { header: 'Situação', key: 'situacao', width: 14 },
-        { header: 'Data Situação', key: 'data_situacao', width: 16 },
-        { header: 'Data Início Atividade', key: 'data_inicio', width: 22 },
-        { header: 'CNAE Principal', key: 'cnae', width: 16 },
-        { header: 'Descrição CNAE', key: 'cnae_descricao', width: 46 },
-        { header: 'CNAE Secundário', key: 'cnae_secundario', width: 32 },
-        { header: 'MEI', key: 'mei', width: 8 },
-        { header: 'Simples Nacional', key: 'simples', width: 18 },
-        { header: 'Porte', key: 'porte', width: 24 },
-        { header: 'Capital Social (R$)', key: 'capital_social', width: 22 },
-        { header: 'Natureza Jurídica', key: 'natureza_juridica', width: 40 },
-        { header: 'UF', key: 'uf', width: 6 },
-        { header: 'Município', key: 'municipio', width: 28 },
-        { header: 'Endereço', key: 'endereco', width: 50 },
-        { header: 'Bairro', key: 'bairro', width: 22 },
-        { header: 'CEP', key: 'cep', width: 12 },
-        { header: 'Telefone 1', key: 'telefone1', width: 18 },
-        { header: 'Telefone 2', key: 'telefone2', width: 18 },
-        { header: 'E-mail', key: 'email', width: 36 },
-        { header: 'Sócios', key: 'socios', width: 60 },
-      ];
+        const workbook = new ExcelJS.Workbook();
+        workbook.creator = 'Systa';
+        workbook.created = new Date();
 
-      const headerRow = sheet.getRow(1);
-      headerRow.font = { bold: true, color: { argb: 'FFFFFFFF' }, size: 11 };
-      headerRow.fill = {
-        type: 'pattern',
-        pattern: 'solid',
-        fgColor: { argb: 'FF6D28D9' },
-      };
-      headerRow.alignment = { vertical: 'middle', horizontal: 'center' };
-      headerRow.height = 20;
+        const sheet = workbook.addWorksheet('Estabelecimentos');
 
-      for (const r of rows) {
-        const logradouro = [r.tipo_logradouro, r.logradouro, r.numero, r.complemento]
-          .map((v) => v?.trim())
-          .filter(Boolean)
-          .join(', ');
+        sheet.columns = [
+          { header: 'CNPJ', key: 'cnpj', width: 22 },
+          { header: 'Razão Social', key: 'razao_social', width: 42 },
+          { header: 'Nome Fantasia', key: 'nome_fantasia', width: 32 },
+          { header: 'Matriz/Filial', key: 'matriz_filial', width: 14 },
+          { header: 'Situação', key: 'situacao', width: 14 },
+          { header: 'Data Situação', key: 'data_situacao', width: 16 },
+          { header: 'Data Início Atividade', key: 'data_inicio', width: 22 },
+          { header: 'CNAE Principal', key: 'cnae', width: 16 },
+          { header: 'Descrição CNAE', key: 'cnae_descricao', width: 46 },
+          { header: 'CNAE Secundário', key: 'cnae_secundario', width: 32 },
+          { header: 'MEI', key: 'mei', width: 8 },
+          { header: 'Simples Nacional', key: 'simples', width: 18 },
+          { header: 'Porte', key: 'porte', width: 24 },
+          { header: 'Capital Social (R$)', key: 'capital_social', width: 22 },
+          { header: 'Natureza Jurídica', key: 'natureza_juridica', width: 40 },
+          { header: 'UF', key: 'uf', width: 6 },
+          { header: 'Município', key: 'municipio', width: 28 },
+          { header: 'Endereço', key: 'endereco', width: 50 },
+          { header: 'Bairro', key: 'bairro', width: 22 },
+          { header: 'CEP', key: 'cep', width: 12 },
+          { header: 'Telefone 1', key: 'telefone1', width: 18 },
+          { header: 'Telefone 2', key: 'telefone2', width: 18 },
+          { header: 'E-mail', key: 'email', width: 36 },
+          { header: 'Sócios', key: 'socios', width: 60 },
+        ];
 
-        sheet.addRow({
-          cnpj: formatCNPJ(r.cnpj_base, r.cnpj_ordem, r.cnpj_dv),
-          razao_social: r.razao_social?.trim() ?? '',
-          nome_fantasia: r.nome_fantasia?.trim() ?? '',
-          matriz_filial: r.identificador_matriz_filial === '1' ? 'Matriz' : r.identificador_matriz_filial === '2' ? 'Filial' : '',
-          situacao: SITUACAO_MAP[r.situacao_cadastral ?? ''] ?? r.situacao_cadastral ?? '',
-          data_situacao: formatDate(r.data_situacao_cadastral) ?? '',
-          data_inicio: formatDate(r.data_inicio_atividade) ?? '',
-          cnae: r.cnae_fiscal_principal ?? '',
-          cnae_descricao: r.cnae_descricao?.trim() ?? '',
-          cnae_secundario: r.cnae_fiscal_secundaria?.trim() ?? '',
-          mei: r.opcao_mei === 'S' ? 'Sim' : 'Não',
-          simples: r.opcao_simples === 'S' ? 'Sim' : r.opcao_simples === 'N' ? 'Não' : '',
-          porte: PORTE_MAP[r.porte ?? ''] ?? r.porte ?? '',
-          capital_social: r.capital_social ?? 0,
-          natureza_juridica: r.natureza_juridica?.trim() ?? '',
-          uf: r.uf ?? '',
-          municipio: r.municipio_nome ?? '',
-          endereco: logradouro,
-          bairro: r.bairro?.trim() ?? '',
-          cep: formatCEP(r.cep) ?? '',
-          telefone1: formatFone(r.ddd1, r.telefone1) ?? '',
-          telefone2: formatFone(r.ddd2, r.telefone2) ?? '',
-          email: r.correio_eletronico?.trim().toLowerCase() ?? '',
-          socios: r.socios?.trim() ?? '',
+        const headerRow = sheet.getRow(1);
+        headerRow.font = { bold: true, color: { argb: 'FFFFFFFF' }, size: 11 };
+        headerRow.fill = {
+          type: 'pattern',
+          pattern: 'solid',
+          fgColor: { argb: 'FF6D28D9' },
+        };
+        headerRow.alignment = { vertical: 'middle', horizontal: 'center' };
+        headerRow.height = 20;
+
+        for (const r of rows) {
+          const logradouro = [r.tipo_logradouro, r.logradouro, r.numero, r.complemento]
+            .map((v) => v?.trim())
+            .filter(Boolean)
+            .join(', ');
+
+          sheet.addRow({
+            cnpj: formatCNPJ(r.cnpj_base, r.cnpj_ordem, r.cnpj_dv),
+            razao_social: r.razao_social?.trim() ?? '',
+            nome_fantasia: r.nome_fantasia?.trim() ?? '',
+            matriz_filial: r.identificador_matriz_filial === '1' ? 'Matriz' : r.identificador_matriz_filial === '2' ? 'Filial' : '',
+            situacao: SITUACAO_MAP[r.situacao_cadastral ?? ''] ?? r.situacao_cadastral ?? '',
+            data_situacao: formatDate(r.data_situacao_cadastral) ?? '',
+            data_inicio: formatDate(r.data_inicio_atividade) ?? '',
+            cnae: r.cnae_fiscal_principal ?? '',
+            cnae_descricao: r.cnae_descricao?.trim() ?? '',
+            cnae_secundario: r.cnae_fiscal_secundaria?.trim() ?? '',
+            mei: r.opcao_mei === 'S' ? 'Sim' : 'Não',
+            simples: r.opcao_simples === 'S' ? 'Sim' : r.opcao_simples === 'N' ? 'Não' : '',
+            porte: PORTE_MAP[r.porte ?? ''] ?? r.porte ?? '',
+            capital_social: r.capital_social ?? 0,
+            natureza_juridica: r.natureza_juridica?.trim() ?? '',
+            uf: r.uf ?? '',
+            municipio: r.municipio_nome ?? '',
+            endereco: logradouro,
+            bairro: r.bairro?.trim() ?? '',
+            cep: formatCEP(r.cep) ?? '',
+            telefone1: formatFone(r.ddd1, r.telefone1) ?? '',
+            telefone2: formatFone(r.ddd2, r.telefone2) ?? '',
+            email: r.correio_eletronico?.trim().toLowerCase() ?? '',
+            socios: r.socios?.trim() ?? '',
+          });
+        }
+
+        const capitalColIdx = sheet.columns.findIndex((c) => c.key === 'capital_social') + 1;
+        if (capitalColIdx > 0) {
+          sheet.getColumn(capitalColIdx).numFmt = '#,##0.00';
+        }
+
+        sheet.views = [{ state: 'frozen', xSplit: 0, ySplit: 1 }];
+        sheet.autoFilter = {
+          from: { row: 1, column: 1 },
+          to: { row: 1, column: sheet.columns.length },
+        };
+
+        buffer = await workbook.xlsx.writeBuffer();
+      } catch (err) {
+        // Refund credits if the export failed after deduction
+        if (!isCached && exportCost > 0) {
+          await addCredits(
+            request.user.userId,
+            exportCost,
+            'EXPORT_REFUND',
+            `Reembolso automático por falha na exportação`,
+          );
+        }
+        throw err;
+      }
+
+      // Save cache entry on first successful export with these filters
+      if (!isCached) {
+        const expiresAt = new Date(now.getTime() + CACHE_TTL_MS);
+        await prisma.consultaCache.upsert({
+          where: { userId_paramsHash: { userId: request.user.userId, paramsHash } },
+          create: { userId: request.user.userId, paramsHash, params: body as unknown as Prisma.InputJsonValue, total, expiresAt },
+          update: { total, expiresAt },
         });
       }
 
-      // Format capital social column as currency
-      const capitalColIdx = sheet.columns.findIndex((c) => c.key === 'capital_social') + 1;
-      if (capitalColIdx > 0) {
-        sheet.getColumn(capitalColIdx).numFmt = '#,##0.00';
-      }
-
-      // Freeze header row
-      sheet.views = [{ state: 'frozen', xSplit: 0, ySplit: 1 }];
-
-      // Auto-filter on header row
-      sheet.autoFilter = {
-        from: { row: 1, column: 1 },
-        to: { row: 1, column: sheet.columns.length },
-      };
-
-      const buffer = await workbook.xlsx.writeBuffer();
       return reply
         .header('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
         .header('Content-Disposition', `attachment; filename="consulta_${new Date().toISOString().slice(0, 10)}.xlsx"`)
