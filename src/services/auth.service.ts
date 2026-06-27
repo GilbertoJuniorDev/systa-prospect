@@ -5,8 +5,12 @@ import crypto from 'crypto';
 const JWT_SECRET = process.env.JWT_SECRET!;
 const JWT_EXPIRY = Number(process.env.JWT_EXPIRY_SECONDS ?? 86400);
 
+// Hash bcrypt válido (cost 12) usado por verifyPasswordSafe para gastar tempo
+// equivalente ao de um login real quando o usuário não existe, evitando
+// enumeração de contas por timing. PRECISA ser um hash válido — um hash
+// malformado faz bcrypt.compare retornar rápido e anula a mitigação.
 const DUMMY_HASH =
-  '$2b$12$KIX/P2nmFj4X4a0XnTtqLe3qCCb9y5X2k1k2k1k2k1k2k1k2k1k2';
+  '$2b$12$uVexoE5/NbCsNEcPMDe8mOunI40Z6HRPPqkFc6/XrrEmidxr5Y68u';
 
 export async function hashPassword(plain: string): Promise<string> {
   return bcrypt.hash(plain, 12);
@@ -44,7 +48,10 @@ export function verifyAccessToken(token: string): {
   userId: string;
   email: string;
 } {
-  const decoded = jwt.verify(token, JWT_SECRET, { issuer: 'systa' }) as {
+  const decoded = jwt.verify(token, JWT_SECRET, {
+    issuer: 'systa',
+    algorithms: ['HS256'],
+  }) as {
     userId: string;
     email: string;
   };

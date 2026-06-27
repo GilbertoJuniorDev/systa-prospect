@@ -164,7 +164,7 @@ model CreditTransaction {
   amount          Int
   type            String
   description     String?
-  stripeSessionId String?
+  stripeSessionId String?  @unique
   paramsHash      String?
   createdAt       DateTime @default(now())
 

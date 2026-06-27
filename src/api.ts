@@ -11,14 +11,16 @@ import { consultaRoutes } from './routes/consulta';
 import { creditsRoutes } from './routes/credits';
 import { SITUACAO_MAP, formatFone, formatCNPJ, formatCEP } from './lib/formatters';
 import { authenticate } from './lib/authenticate';
-import { deductCredits } from './lib/credits';
 
-if (!process.env.DATABASE_URL) {
-  console.error('FATAL: variável DATABASE_URL não definida.');
-  process.exit(1);
+const REQUIRED_ENV_VARS = ['DATABASE_URL', 'JWT_SECRET', 'STRIPE_SECRET_KEY', 'STRIPE_WEBHOOK_SECRET'] as const;
+for (const key of REQUIRED_ENV_VARS) {
+  if (!process.env[key]) {
+    console.error(`FATAL: variável de ambiente "${key}" não definida.`);
+    process.exit(1);
+  }
 }
 
-const app = Fastify({ logger: true });
+const app = Fastify({ logger: true, trustProxy: true });
 
 const PORT = (() => {
   const p = parseInt(process.env.PORT ?? '3333', 10);
@@ -36,6 +38,7 @@ app.get<{
   Querystring: { situacao?: string; mei?: string; limite?: string; pagina?: string };
 }>(
   '/empresas/cnae/:codigo',
+  { preHandler: [authenticate] },
   async (request, reply) => {
     const codigo = request.params.codigo.replace(/\D/g, '');
 
@@ -138,6 +141,7 @@ app.get<{
 
 app.get<{ Params: { cnpj_base: string } }>(
   '/empresas/:cnpj_base',
+  { preHandler: [authenticate] },
   async (request, reply) => {
     const { cnpj_base } = request.params;
 
@@ -164,6 +168,7 @@ app.get<{ Params: { cnpj_base: string } }>(
 
 app.get<{ Querystring: { nome?: string; limite?: string } }>(
   '/empresas/buscar',
+  { preHandler: [authenticate] },
   async (request, reply) => {
     const { nome, limite } = request.query;
 
@@ -355,15 +360,6 @@ app.get<{ Params: { cnpj: string } }>(
       return reply.status(404).send({ error: 'CNPJ não encontrado.' });
     }
 
-    const credited = await deductCredits(
-      request.user.userId,
-      1,
-      'CNPJ_QUERY',
-      'Consulta CNPJ ' + cnpj,
-      reply,
-    );
-    if (!credited) return;
-
     const r = rows[0];
 
     const codigosSecundarios: string[] = r.cnae_fiscal_secundaria
@@ -487,9 +483,30 @@ app.setErrorHandler((error: Error & { statusCode?: number }, _request, reply) =>
 
 async function start(): Promise<void> {
   try {
-    await app.register(helmet);
+    await app.register(helmet, {
+      strictTransportSecurity: {
+        maxAge: 31536000,
+        includeSubDomains: true,
+        preload: true,
+      },
+    });
+
+    const isProd = process.env.NODE_ENV === 'production';
+    const allowedOrigins = (process.env.APP_FRONTEND_URL ?? '')
+      .split(',')
+      .map((o) => o.trim())
+      .filter(Boolean);
+    if (allowedOrigins.length === 0) {
+      if (isProd) {
+        console.error('FATAL: APP_FRONTEND_URL não definida em produção.');
+        process.exit(1);
+      }
+      allowedOrigins.push('http://localhost:3001');
+    }
+
     await app.register(cors, {
-      origin: process.env.APP_FRONTEND_URL ?? 'http://localhost:3001',
+      origin: allowedOrigins,
+      methods: ['GET', 'POST'],
     });
     await app.register(rateLimit, { max: 60, timeWindow: '1 minute' });
     await app.register(authRoutes, { prefix: '/auth' });

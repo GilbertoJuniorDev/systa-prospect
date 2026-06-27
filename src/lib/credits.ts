@@ -1,3 +1,4 @@
+import { Prisma } from '@prisma/client';
 import { prisma } from './prisma';
 import { FastifyReply } from 'fastify';
 
@@ -10,37 +11,31 @@ export async function deductCredits(
   paramsHash?: string,
 ): Promise<boolean> {
   try {
-    await prisma.$transaction(async (tx) => {
-      const user = await tx.user.findUnique({
-        where: { id: userId },
-        select: { credits: true },
-      });
+    // Atomic conditional UPDATE: only decrements if balance >= amount.
+    // Avoids the read-check-write race condition that could produce negative balances
+    // when two concurrent requests both read the same balance before either writes.
+    const updated = await prisma.$queryRaw<{ credits: number }[]>`
+      UPDATE "User"
+      SET credits = credits - ${amount}
+      WHERE id = ${userId} AND credits >= ${amount}
+      RETURNING credits
+    `;
 
-      if (!user || user.credits < amount) {
-        reply.code(402).send({ error: 'insufficient_credits', required: amount });
-        // Throw to abort the transaction without updating anything
-        throw new Error('INSUFFICIENT_CREDITS');
-      }
-
-      await tx.user.update({
-        where: { id: userId },
-        data: { credits: { decrement: amount } },
-      });
-
-      await tx.creditTransaction.create({
-        data: {
-          userId,
-          amount: -amount,
-          type,
-          description,
-          paramsHash,
-        },
-      });
-    });
-  } catch (err: unknown) {
-    if (err instanceof Error && err.message === 'INSUFFICIENT_CREDITS') {
+    if (updated.length === 0) {
+      reply.code(402).send({ error: 'insufficient_credits', required: amount });
       return false;
     }
+
+    await prisma.creditTransaction.create({
+      data: {
+        userId,
+        amount: -amount,
+        type,
+        description,
+        paramsHash,
+      },
+    });
+  } catch (err: unknown) {
     throw err;
   }
 
@@ -54,27 +49,37 @@ export async function addCredits(
   description: string,
   stripeSessionId?: string,
 ): Promise<void> {
-  if (stripeSessionId) {
-    const existing = await prisma.creditTransaction.findFirst({
-      where: { stripeSessionId },
+  try {
+    await prisma.$transaction(async (tx) => {
+      // Idempotency check inside the transaction prevents TOCTOU: two concurrent
+      // webhook retries could both pass an external findFirst before either inserts.
+      if (stripeSessionId) {
+        const existing = await tx.creditTransaction.findFirst({
+          where: { stripeSessionId },
+        });
+        if (existing) return;
+      }
+
+      await tx.user.update({
+        where: { id: userId },
+        data: { credits: { increment: amount } },
+      });
+
+      await tx.creditTransaction.create({
+        data: {
+          userId,
+          amount,
+          type,
+          description,
+          stripeSessionId,
+        },
+      });
     });
-    if (existing) return;
+  } catch (err: unknown) {
+    // P2002 = unique constraint violation on stripeSessionId — already processed, safe to ignore.
+    if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002') {
+      return;
+    }
+    throw err;
   }
-
-  await prisma.$transaction(async (tx) => {
-    await tx.user.update({
-      where: { id: userId },
-      data: { credits: { increment: amount } },
-    });
-
-    await tx.creditTransaction.create({
-      data: {
-        userId,
-        amount,
-        type,
-        description,
-        stripeSessionId,
-      },
-    });
-  });
 }

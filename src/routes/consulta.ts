@@ -120,6 +120,21 @@ function validateBody(body: ConsultaBody): string | null {
 }
 
 export async function consultaRoutes(app: FastifyInstance) {
+  // ─── GET /consultas/minhas ───────────────────────────────────────────────────
+  app.get(
+    '/consultas/minhas',
+    { preHandler: [authenticate] },
+    async (request, reply) => {
+      const { userId } = request.user;
+      const consultas = await prisma.consultaCache.findMany({
+        where: { userId },
+        select: { id: true, params: true, total: true, expiresAt: true, createdAt: true },
+        orderBy: { createdAt: 'desc' },
+      });
+      return { consultas };
+    },
+  );
+
   // ─── GET /cnaes/buscar?q= ────────────────────────────────────────────────────
   app.get<{ Querystring: { q?: string } }>('/cnaes/buscar', async (request, reply) => {
     const q = request.query.q?.trim() ?? '';
@@ -172,7 +187,10 @@ export async function consultaRoutes(app: FastifyInstance) {
   });
 
   // ─── POST /consulta ───────────────────────────────────────────────────────────
-  app.post<{ Body: ConsultaBody }>('/consulta', async (request, reply) => {
+  app.post<{ Body: ConsultaBody }>(
+    '/consulta',
+    { config: { rateLimit: { max: 20, timeWindow: '1 minute' } } },
+    async (request, reply) => {
     const body = request.body;
     const err = validateBody(body);
     if (err) return reply.status(400).send({ error: err });
@@ -199,7 +217,8 @@ export async function consultaRoutes(app: FastifyInstance) {
     }
 
     return { total };
-  });
+    },
+  );
 
   // ─── POST /consulta/exportar ──────────────────────────────────────────────────
   app.post<{ Body: ConsultaBody }>(
@@ -248,7 +267,7 @@ export async function consultaRoutes(app: FastifyInstance) {
 
       let exportCost = 0;
       if (!isCached) {
-        exportCost = Math.max(1, Math.ceil(total / 1000));
+        exportCost = Math.max(1, Math.ceil(total / 10));
         const credited = await deductCredits(
           request.user.userId,
           exportCost,

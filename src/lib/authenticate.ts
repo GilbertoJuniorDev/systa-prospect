@@ -18,5 +18,6 @@ export async function authenticate(
     request.user = verifyAccessToken(token);
   } catch {
     reply.code(401).send({ error: 'Unauthorized' });
+    return;
   }
 }
