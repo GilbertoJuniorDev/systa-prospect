@@ -512,6 +512,8 @@ async function start(): Promise<void> {
     await app.register(authRoutes, { prefix: '/auth' });
     await app.register(consultaRoutes);
     await app.register(creditsRoutes);
+    // Pré-conecta o pool do Prisma no boot para evitar timeout na 1ª consulta (cold start)
+    await prisma.$connect();
     await app.listen({ port: PORT, host: '0.0.0.0' });
   } catch (err) {
     app.log.error(err);
