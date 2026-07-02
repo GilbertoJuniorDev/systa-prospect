@@ -65,8 +65,27 @@ services:
       - default
       - systa-network
 
+  ingest:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: cnpj-ingest
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      NODE_ENV: production
+      DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}?schema=public
+      SHARE_TOKEN: ${SHARE_TOKEN}
+      INGEST_MONTH: ${INGEST_MONTH}
+    volumes:
+      - ingest_temp:/app/temp
+    command: ['sh', '-c', 'node dist/download.js && node dist/ingest.js']
+    profiles: ['ingest']
+
 volumes:
   pgdata:
+  ingest_temp:
 
 networks:
   systa-network:

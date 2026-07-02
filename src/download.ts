@@ -11,7 +11,7 @@ if (!SHARE_TOKEN) {
 }
 const AUTH = Buffer.from(`${SHARE_TOKEN}:`).toString('base64');
 
-const DIR = '2026-06';
+const DIR = process.env.INGEST_MONTH ?? '2026-06';
 const TEMP_DIR = path.resolve('./temp');
 const WEBDAV_URL = `https://arquivos.receitafederal.gov.br/public.php/webdav/${DIR}/`;
 const MB = 1_000_000;
