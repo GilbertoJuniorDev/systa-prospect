@@ -12,7 +12,7 @@ import { creditsRoutes } from './routes/credits';
 import { SITUACAO_MAP, formatFone, formatCNPJ, formatCEP } from './lib/formatters';
 import { authenticate } from './lib/authenticate';
 
-const REQUIRED_ENV_VARS = ['DATABASE_URL', 'JWT_SECRET', 'STRIPE_SECRET_KEY', 'STRIPE_WEBHOOK_SECRET'] as const;
+const REQUIRED_ENV_VARS = ['DATABASE_URL', 'JWT_SECRET', 'STRIPE_SECRET_KEY', 'STRIPE_WEBHOOK_SECRET', 'INTERNAL_API_KEY'] as const;
 for (const key of REQUIRED_ENV_VARS) {
   if (!process.env[key]) {
     console.error(`FATAL: variável de ambiente "${key}" não definida.`);
@@ -21,6 +21,16 @@ for (const key of REQUIRED_ENV_VARS) {
 }
 
 const app = Fastify({ logger: true, trustProxy: true });
+
+// Restringe o acesso à API a chamadores que possuam o segredo compartilhado
+// (ex.: backend do frontend), já que o serviço roda sem domínio público.
+app.addHook('onRequest', async (request, reply) => {
+  if (request.url === '/health') return;
+  const key = request.headers['x-internal-api-key'];
+  if (key !== process.env.INTERNAL_API_KEY) {
+    reply.code(403).send({ error: 'Forbidden' });
+  }
+});
 
 const PORT = (() => {
   const p = parseInt(process.env.PORT ?? '3333', 10);

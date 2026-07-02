@@ -1,37 +1,66 @@
-version: '3.9'
-
 services:
   postgres:
     image: postgres:16-alpine
     container_name: cnpj-postgres
     restart: unless-stopped
     shm_size: '1gb'
-    ports:
-      - '5432:5432'
     environment:
-      POSTGRES_USER: cnpj
-      POSTGRES_PASSWORD: cnpj_secret
-      POSTGRES_DB: cnpj_db
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
     volumes:
       - pgdata:/var/lib/postgresql/data
       - ./docker/postgres-init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}']
+      interval: 10s
+      timeout: 5s
+      retries: 5
     deploy:
       resources:
         limits:
           memory: 4g
     command: >
       postgres
-      -c max_wal_size=4GB
-      -c checkpoint_timeout=30min
-      -c synchronous_commit=off
-      -c wal_buffers=64MB
+      -c max_wal_size=2GB
       -c shared_buffers=512MB
-      -c work_mem=64MB
-      -c maintenance_work_mem=512MB
-      -c max_parallel_maintenance_workers=4
-      -c wal_compression=on
-      -c autovacuum=off
+      -c work_mem=32MB
+      -c maintenance_work_mem=256MB
+
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: cnpj-api
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      NODE_ENV: production
+      PORT: 3333
+      DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}?schema=public
+      SHARE_TOKEN: ${SHARE_TOKEN}
+      JWT_SECRET: ${JWT_SECRET}
+      JWT_EXPIRY_SECONDS: ${JWT_EXPIRY_SECONDS}
+      SMTP_HOST: ${SMTP_HOST}
+      SMTP_PORT: ${SMTP_PORT}
+      SMTP_SECURE: ${SMTP_SECURE}
+      SMTP_USER: ${SMTP_USER}
+      SMTP_PASS: ${SMTP_PASS}
+      SMTP_FROM: ${SMTP_FROM}
+      APP_FRONTEND_URL: ${APP_FRONTEND_URL}
+      STRIPE_SECRET_KEY: ${STRIPE_SECRET_KEY}
+      STRIPE_WEBHOOK_SECRET: ${STRIPE_WEBHOOK_SECRET}
+      INITIAL_CREDITS: ${INITIAL_CREDITS}
+      INTERNAL_API_KEY: ${INTERNAL_API_KEY}
+    expose:
+      - '3333'
+    healthcheck:
+      test: ['CMD', 'node', '-e', "require('http').get('http://localhost:3333/health',r=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
 
 volumes:
   pgdata:
-
