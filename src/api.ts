@@ -26,7 +26,7 @@ const app = Fastify({ logger: true, trustProxy: true });
 // (ex.: backend do frontend), já que o serviço roda sem domínio público.
 app.addHook('onRequest', async (request, reply) => {
   const routeUrl = request.routeOptions?.url ?? request.url;
-  if (routeUrl === '/health' || routeUrl === '/stripe/webhook') return;
+  if (routeUrl === '/health') return;
   const key = request.headers['x-internal-api-key'];
   if (key !== process.env.INTERNAL_API_KEY) {
     return reply.code(403).send({ error: 'Forbidden' });
