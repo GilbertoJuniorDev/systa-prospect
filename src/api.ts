@@ -25,10 +25,11 @@ const app = Fastify({ logger: true, trustProxy: true });
 // Restringe o acesso à API a chamadores que possuam o segredo compartilhado
 // (ex.: backend do frontend), já que o serviço roda sem domínio público.
 app.addHook('onRequest', async (request, reply) => {
-  if (request.url === '/health') return;
+  const routeUrl = request.routeOptions?.url ?? request.url;
+  if (routeUrl === '/health' || routeUrl === '/stripe/webhook') return;
   const key = request.headers['x-internal-api-key'];
   if (key !== process.env.INTERNAL_API_KEY) {
-    reply.code(403).send({ error: 'Forbidden' });
+    return reply.code(403).send({ error: 'Forbidden' });
   }
 });
 
