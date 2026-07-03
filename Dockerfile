@@ -18,4 +18,4 @@ COPY package*.json ./
 
 EXPOSE 3333
 
-CMD ["sh", "-c", "npx prisma migrate deploy && node dist/api.js"]
+CMD ["sh", "-c", "for i in 1 2 3 4 5 6 7 8 9 10; do npx prisma migrate deploy && break; echo 'postgres not ready, retrying in 5s...'; sleep 5; done && node dist/api.js"]
