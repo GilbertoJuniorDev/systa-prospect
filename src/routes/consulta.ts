@@ -15,6 +15,10 @@ interface ConsultaBody {
   municipios?: string[];
   situacao: 'ativa' | 'inativa' | 'todas';
   mei: 'sim' | 'nao' | 'todos';
+  dataAberturaDeMes?: number;
+  dataAberturaDeAno?: number;
+  dataAberturaAteMes?: number;
+  dataAberturaAteAno?: number;
 }
 
 type ConsultaRow = {
@@ -73,10 +77,29 @@ function buildConsultaWhere(body: ConsultaBody): Prisma.Sql {
       ? Prisma.sql`AND e.municipio = ANY(${body.municipios})`
       : Prisma.empty;
 
+  const dataAberturaDeClause =
+    body.dataAberturaDeMes !== undefined && body.dataAberturaDeAno !== undefined
+      ? Prisma.sql`AND e.data_inicio_atividade >= ${`${body.dataAberturaDeAno}${String(body.dataAberturaDeMes).padStart(2, '0')}01`}`
+      : Prisma.empty;
+
+  const dataAberturaAteClause = (() => {
+    if (body.dataAberturaAteMes === undefined || body.dataAberturaAteAno === undefined) return Prisma.empty;
+    let ano = body.dataAberturaAteAno;
+    let mesSeguinte = body.dataAberturaAteMes + 1;
+    if (mesSeguinte > 12) {
+      mesSeguinte = 1;
+      ano += 1;
+    }
+    const bound = `${ano}${String(mesSeguinte).padStart(2, '0')}01`;
+    return Prisma.sql`AND e.data_inicio_atividade < ${bound}`;
+  })();
+
   return Prisma.sql`
     WHERE e.cnae_fiscal_principal = ANY(${body.cnaes})
       AND e.uf = ${body.uf}
       ${municipioClause}
+      ${dataAberturaDeClause}
+      ${dataAberturaAteClause}
       ${situacaoClause}
       ${meiClause}
   `;
@@ -91,6 +114,10 @@ function buildParamsHash(body: ConsultaBody): string {
     municipios: body.municipios ? [...body.municipios].sort() : [],
     situacao: body.situacao,
     mei: body.mei,
+    dataAberturaDeMes: body.dataAberturaDeMes ?? null,
+    dataAberturaDeAno: body.dataAberturaDeAno ?? null,
+    dataAberturaAteMes: body.dataAberturaAteMes ?? null,
+    dataAberturaAteAno: body.dataAberturaAteAno ?? null,
   };
   return crypto.createHash('sha256').update(JSON.stringify(normalized)).digest('hex');
 }
@@ -116,6 +143,48 @@ function validateBody(body: ConsultaBody): string | null {
   if (!['sim', 'nao', 'todos'].includes(body.mei)) {
     return 'Campo "mei" deve ser "sim", "nao" ou "todos".';
   }
+
+  const currentYear = new Date().getFullYear();
+  const isValidMes = (v: number) => Number.isInteger(v) && v >= 1 && v <= 12;
+  const isValidAno = (v: number) => Number.isInteger(v) && v >= 1900 && v <= currentYear;
+
+  if (body.dataAberturaDeMes !== undefined && !isValidMes(body.dataAberturaDeMes)) {
+    return 'Campo "dataAberturaDeMes" deve ser um número inteiro entre 1 e 12.';
+  }
+  if (body.dataAberturaDeAno !== undefined && !isValidAno(body.dataAberturaDeAno)) {
+    return `Campo "dataAberturaDeAno" deve ser um número inteiro entre 1900 e ${currentYear}.`;
+  }
+  if (body.dataAberturaAteMes !== undefined && !isValidMes(body.dataAberturaAteMes)) {
+    return 'Campo "dataAberturaAteMes" deve ser um número inteiro entre 1 e 12.';
+  }
+  if (body.dataAberturaAteAno !== undefined && !isValidAno(body.dataAberturaAteAno)) {
+    return `Campo "dataAberturaAteAno" deve ser um número inteiro entre 1900 e ${currentYear}.`;
+  }
+
+  const deMesSet = body.dataAberturaDeMes !== undefined;
+  const deAnoSet = body.dataAberturaDeAno !== undefined;
+  if (deMesSet !== deAnoSet) {
+    return deMesSet
+      ? 'Informe também o ano de abertura (De) quando o mês for informado.'
+      : 'Informe também o mês de abertura (De) quando o ano for informado.';
+  }
+
+  const ateMesSet = body.dataAberturaAteMes !== undefined;
+  const ateAnoSet = body.dataAberturaAteAno !== undefined;
+  if (ateMesSet !== ateAnoSet) {
+    return ateMesSet
+      ? 'Informe também o ano de abertura (Até) quando o mês for informado.'
+      : 'Informe também o mês de abertura (Até) quando o ano for informado.';
+  }
+
+  if (deMesSet && deAnoSet && ateMesSet && ateAnoSet) {
+    const deVal = body.dataAberturaDeAno! * 100 + body.dataAberturaDeMes!;
+    const ateVal = body.dataAberturaAteAno! * 100 + body.dataAberturaAteMes!;
+    if (deVal > ateVal) {
+      return 'O período "De" da data de abertura deve ser anterior ou igual ao período "Até".';
+    }
+  }
+
   return null;
 }
 
@@ -266,9 +335,10 @@ export async function consultaRoutes(app: FastifyInstance) {
       const isCached = cached !== null && cached.expiresAt > now;
 
       let exportCost = 0;
+      let newBalance: number | null = null;
       if (!isCached) {
         exportCost = total;
-        const credited = await deductCredits(
+        newBalance = await deductCredits(
           request.user.userId,
           exportCost,
           'EXPORT',
@@ -276,7 +346,7 @@ export async function consultaRoutes(app: FastifyInstance) {
           reply,
           paramsHash,
         );
-        if (!credited) return;
+        if (newBalance === null) return;
       }
 
       let buffer: ArrayBuffer;
@@ -434,10 +504,15 @@ export async function consultaRoutes(app: FastifyInstance) {
         });
       }
 
-      return reply
+      const response = reply
         .header('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
-        .header('Content-Disposition', `attachment; filename="consulta_${new Date().toISOString().slice(0, 10)}.xlsx"`)
-        .send(Buffer.from(buffer));
+        .header('Content-Disposition', `attachment; filename="consulta_${new Date().toISOString().slice(0, 10)}.xlsx"`);
+
+      if (newBalance !== null) {
+        response.header('X-Credits-Balance', String(newBalance));
+      }
+
+      return response.send(Buffer.from(buffer));
     },
   );
 }

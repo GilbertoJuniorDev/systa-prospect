@@ -9,7 +9,7 @@ export async function deductCredits(
   description: string,
   reply: FastifyReply,
   paramsHash?: string,
-): Promise<boolean> {
+): Promise<number | null> {
   try {
     // Atomic conditional UPDATE: only decrements if balance >= amount.
     // Avoids the read-check-write race condition that could produce negative balances
@@ -23,7 +23,7 @@ export async function deductCredits(
 
     if (updated.length === 0) {
       reply.code(402).send({ error: 'insufficient_credits', required: amount });
-      return false;
+      return null;
     }
 
     await prisma.creditTransaction.create({
@@ -35,11 +35,11 @@ export async function deductCredits(
         paramsHash,
       },
     });
+
+    return updated[0].credits;
   } catch (err: unknown) {
     throw err;
   }
-
-  return true;
 }
 
 export async function addCredits(
