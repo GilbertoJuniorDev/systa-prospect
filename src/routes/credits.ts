@@ -5,9 +5,9 @@ import { authenticate } from '../lib/authenticate';
 import { addCredits } from '../lib/credits';
 
 const PACKAGES = {
-  starter: { credits: 50,  price: 2900,  label: '50 créditos' },
-  pro:     { credits: 150, price: 5900,  label: '150 créditos' },
-  max:     { credits: 500, price: 14900, label: '500 créditos' },
+  starter: { credits: 500,  price: 15000, label: '500 registros' },
+  pro:     { credits: 1000, price: 25000, label: '1.000 registros' },
+  max:     { credits: 2500, price: 50000, label: '2.500 registros (2.000 + 500 bônus)' },
 } as const;
 
 type PackageId = keyof typeof PACKAGES;

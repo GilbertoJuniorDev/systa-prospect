@@ -267,7 +267,7 @@ export async function consultaRoutes(app: FastifyInstance) {
 
       let exportCost = 0;
       if (!isCached) {
-        exportCost = Math.max(1, Math.ceil(total / 10));
+        exportCost = total;
         const credited = await deductCredits(
           request.user.userId,
           exportCost,
