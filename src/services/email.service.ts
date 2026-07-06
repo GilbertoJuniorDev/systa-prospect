@@ -1,10 +1,15 @@
 import nodemailer from 'nodemailer';
 
 function createTransporter() {
+  const secure = process.env.SMTP_SECURE === 'true';
+
   return nodemailer.createTransport({
     host: process.env.SMTP_HOST,
     port: Number(process.env.SMTP_PORT ?? 587),
-    secure: process.env.SMTP_SECURE === 'true',
+    secure,
+    // Prevents silently falling back to plaintext if STARTTLS negotiation
+    // is stripped (e.g. active MITM) when not using implicit TLS.
+    requireTLS: !secure,
     auth: {
       user: process.env.SMTP_USER,
       pass: process.env.SMTP_PASS,
