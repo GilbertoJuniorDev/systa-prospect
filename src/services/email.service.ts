@@ -2,11 +2,15 @@ import nodemailer from 'nodemailer';
 
 function createTransporter() {
   const secure = process.env.SMTP_SECURE === 'true';
+  const certSecure = process.env.TRUST_SMTP === 'true';
 
   return nodemailer.createTransport({
     host: process.env.SMTP_HOST,
     port: Number(process.env.SMTP_PORT ?? 587),
     secure,
+    tls: {
+      rejectUnauthorized: certSecure,
+    },
     // Prevents silently falling back to plaintext if STARTTLS negotiation
     // is stripped (e.g. active MITM) when not using implicit TLS.
     requireTLS: !secure,
