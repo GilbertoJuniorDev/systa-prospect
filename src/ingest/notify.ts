@@ -21,12 +21,17 @@ export interface Notifier {
     kind: 'TEMPORARY' | 'PERMANENT';
     freeBytes: number | null;
   }): Promise<void>;
+  /** Primeiro deploy com base já carregada e sem INGEST_MONTH: ingestão bloqueada. */
+  bootstrapFailed(error: string): Promise<void>;
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
 const RETRY_TEMPORARY = 'Nova tentativa automática em 30 minutos.';
 const RETRY_PERMANENT = 'Nova tentativa na próxima verificação diária ou via npm run ingest:now.';
+const BOOTSTRAP_HINT =
+  'Defina INGEST_MONTH (mês já carregado, AAAA-MM) no .env do serviço ingest e reinicie o serviço. ' +
+  'Não rode ingest:now: ele apagaria e recarregaria a base.';
 
 function escapeHtml(value: string): string {
   return value
@@ -161,6 +166,18 @@ export function createNotifier(
           ) +
             `<p style="color: #3D2B1F; font-size: 14px; line-height: 1.5; white-space: pre-wrap; background: #FAF6F3; padding: 12px; border-radius: 8px;">${escapeHtml(r.error)}</p>` +
             paragraph(retry),
+        ),
+      );
+    },
+
+    async bootstrapFailed(error) {
+      await send(
+        '[CNPJ] Ingestão automática bloqueada: INGEST_MONTH ausente',
+        layout(
+          'Ingestão automática bloqueada',
+          paragraph('A base da Receita já está carregada, mas o mês dela não foi informado.') +
+            `<p style="color: #3D2B1F; font-size: 14px; line-height: 1.5; white-space: pre-wrap; background: #FAF6F3; padding: 12px; border-radius: 8px;">${escapeHtml(error)}</p>` +
+            paragraph(BOOTSTRAP_HINT),
         ),
       );
     },

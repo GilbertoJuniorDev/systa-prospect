@@ -9,7 +9,7 @@ import { decideNext, latestMonth, nextDailyRun, nextWakeUp, type Decision, type 
 import { freeBytes } from './disk';
 import { downloadFile } from './downloader';
 import { loadCsv } from './loader';
-import { createNotifier } from './notify';
+import { createNotifier, type Notifier } from './notify';
 import { executeRun, extractZip, type RunDeps } from './run';
 import { abandonRun, bootstrapIfNeeded, createRun, getLastSuccess, getOpenRun } from './state';
 import { listMonthFiles, listRemoteMonths } from './webdav';
@@ -31,7 +31,7 @@ export type TickDeps = RunDeps & {
 const RETRY_MS = 30 * 60 * 1000;
 const MAX_TIMEOUT_MS = 2 ** 31 - 1;
 
-// ─── Tick ────────────────────────────────────────────────────────────────────
+// ─── Helpers ─────────────────────────────────────────────────────────────────
 
 function errorMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
@@ -41,6 +41,60 @@ function errorMessage(err: unknown): string {
 export function bootstrapOutcome(err: unknown): 'permanent' | 'retry' {
   return err instanceof PermanentError ? 'permanent' : 'retry';
 }
+
+// ─── Bootstrap ───────────────────────────────────────────────────────────────
+
+export interface BootstrapGuard {
+  /** Tenta o bootstrap (até dar certo); lança só em erro re-tentável. */
+  ensure(): Promise<void>;
+  /** true = bootstrap travado por erro permanente (INGEST_MONTH ausente). */
+  failed(): boolean;
+}
+
+/**
+ * Tenta o bootstrap até dar certo; só erro permanente trava a ingestão (e avisa
+ * por e-mail uma vez). Revalida a cada ciclo: se surgirem runs no banco (ex.:
+ * alguém rodou ingest:now), o bloqueio é desfeito.
+ */
+export function createBootstrapGuard(deps: {
+  prisma: PrismaClient;
+  cfg: IngestConfig;
+  notifier: Notifier;
+  log: (m: string) => void;
+}): BootstrapGuard {
+  const { prisma, cfg, notifier, log } = deps;
+  let bootstrapped = false;
+  let bootstrapFailed = false;
+
+  return {
+    failed: () => bootstrapFailed,
+    async ensure() {
+      if (bootstrapped) return;
+      if (bootstrapFailed) {
+        if ((await prisma.ingestRun.count()) > 0) {
+          log('Runs encontrados no banco: bloqueio do bootstrap desfeito');
+          bootstrapFailed = false;
+          bootstrapped = true;
+        }
+        return;
+      }
+      try {
+        await bootstrapIfNeeded(prisma, cfg, log);
+        bootstrapped = true;
+      } catch (err) {
+        if (bootstrapOutcome(err) === 'retry') throw err;
+        bootstrapFailed = true;
+        const msg = errorMessage(err);
+        log(`Bootstrap falhou: ${msg}. Serviço ativo, mas sem ingestão até reiniciar com INGEST_MONTH.`);
+        await notifier
+          .bootstrapFailed(msg)
+          .catch((e) => log(`Falha ao notificar bootstrap: ${errorMessage(e)}`));
+      }
+    },
+  };
+}
+
+// ─── Tick ────────────────────────────────────────────────────────────────────
 
 /**
  * Uma verificação/execução. Só uma instância por vez (advisory lock no banco).
@@ -146,9 +200,12 @@ async function main(): Promise<void> {
   let timer: NodeJS.Timeout | null = null;
   let stopping = false;
   let running = false;
-  let bootstrapped = false;
-  let bootstrapFailed = false;
-  const notifier = createNotifier(cfg, createTransporter(), log);
+  const bootstrap = createBootstrapGuard({
+    prisma,
+    cfg,
+    notifier: createNotifier(cfg, createTransporter(), log),
+    log,
+  });
 
   const shutdown = (signal: string) => {
     if (stopping) return;
@@ -170,36 +227,19 @@ async function main(): Promise<void> {
     timer = setTimeout(() => void cycle(trigger), delay);
   }
 
-  /** Tenta o bootstrap até dar certo; só erro permanente trava a ingestão (e avisa por e-mail uma vez). */
-  async function ensureBootstrap(): Promise<void> {
-    if (bootstrapped || bootstrapFailed) return;
-    try {
-      await bootstrapIfNeeded(prisma, cfg, log);
-      bootstrapped = true;
-    } catch (err) {
-      if (bootstrapOutcome(err) === 'retry') throw err;
-      bootstrapFailed = true;
-      const msg = errorMessage(err);
-      log(`Bootstrap falhou: ${msg}. Serviço ativo, mas sem ingestão até reiniciar com INGEST_MONTH.`);
-      await notifier
-        .failed({ month: '—', phase: 'bootstrap', error: msg, kind: 'PERMANENT', freeBytes: null })
-        .catch((e) => log(`Falha ao notificar bootstrap: ${errorMessage(e)}`));
-    }
-  }
-
   async function cycle(trigger: Trigger): Promise<void> {
     if (running || stopping) return;
     running = true;
     try {
-      await ensureBootstrap();
-      if (bootstrapFailed) {
+      await bootstrap.ensure();
+      if (bootstrap.failed()) {
         log(`[${trigger}] ignorado: defina INGEST_MONTH e reinicie o serviço (bootstrap pendente)`);
       } else {
         await withFreshDb(cfg, prisma, (deps) => tick(trigger, deps));
       }
       const now = new Date();
       const daily = nextDailyRun(now, cfg.cronHour, cfg.timeZone);
-      const wake = nextWakeUp(now, daily, bootstrapFailed ? null : await getOpenRun(prisma));
+      const wake = nextWakeUp(now, daily, bootstrap.failed() ? null : await getOpenRun(prisma));
       schedule(wake.trigger, wake.at);
     } catch (err) {
       log(`Erro no ciclo ${trigger}: ${errorMessage(err)}; nova tentativa em 30 minutos`);

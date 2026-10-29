@@ -207,6 +207,7 @@ describe.skipIf(!url)('executeRun (integração)', () => {
     async failed(r) {
       notes.failed.push(r);
     },
+    async bootstrapFailed() {},
   };
 
   function makeDeps(over: Partial<RunDeps> = {}): RunDeps {

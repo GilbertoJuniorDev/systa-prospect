@@ -6,11 +6,13 @@ vi.mock('../../src/ingest/state', () => ({
   getOpenRun: vi.fn(),
   createRun: vi.fn(),
   abandonRun: vi.fn(),
+  bootstrapIfNeeded: vi.fn(),
 }));
 
-import { bootstrapOutcome, tick } from '../../src/ingest/scheduler';
+import { bootstrapOutcome, createBootstrapGuard, tick } from '../../src/ingest/scheduler';
 import { PermanentError } from '../../src/ingest/errors';
-import { abandonRun, createRun, getLastSuccess, getOpenRun } from '../../src/ingest/state';
+import { abandonRun, bootstrapIfNeeded, createRun, getLastSuccess, getOpenRun } from '../../src/ingest/state';
+import type { Notifier } from '../../src/ingest/notify';
 
 // ─── Fakes ───────────────────────────────────────────────────────────────────
 
@@ -111,6 +113,61 @@ describe('tick', () => {
     await expect(tick('manual', deps, '2026-08')).rejects.toThrow('x');
     expect(createRun).toHaveBeenCalledWith(deps.prisma, '2026-08');
     expect(queries[queries.length - 1]).toContain('pg_advisory_unlock(727011)');
+  });
+});
+
+describe('createBootstrapGuard', () => {
+  function setup(count: number) {
+    const runs = { count };
+    const prisma = { ingestRun: { count: vi.fn(async () => runs.count) } } as unknown as RunDeps['prisma'];
+    const notifier = {
+      started: vi.fn(),
+      succeeded: vi.fn(),
+      failed: vi.fn(async () => {}),
+      bootstrapFailed: vi.fn(async () => {}),
+    } satisfies Notifier;
+    const guard = createBootstrapGuard({ prisma, cfg: {} as RunDeps['cfg'], notifier, log: vi.fn() });
+    return { runs, guard, notifier };
+  }
+
+  beforeEach(() => {
+    vi.mocked(bootstrapIfNeeded).mockReset();
+  });
+
+  it('permanent failure sends the dedicated bootstrap e-mail once and blocks', async () => {
+    vi.mocked(bootstrapIfNeeded).mockImplementation(async () => {
+      throw new PermanentError('INGEST_MONTH obrigatório');
+    });
+    const { guard, notifier } = setup(0);
+    await guard.ensure();
+    await guard.ensure();
+    expect(guard.failed()).toBe(true);
+    expect(notifier.bootstrapFailed).toHaveBeenCalledTimes(1);
+    expect(notifier.bootstrapFailed).toHaveBeenCalledWith('INGEST_MONTH obrigatório');
+    expect(notifier.failed).not.toHaveBeenCalled();
+  });
+
+  it('clears the failure once IngestRun has rows (e.g. ingest:now ran)', async () => {
+    vi.mocked(bootstrapIfNeeded).mockImplementation(async () => {
+      throw new PermanentError('INGEST_MONTH obrigatório');
+    });
+    const { runs, guard } = setup(0);
+    await guard.ensure();
+    expect(guard.failed()).toBe(true);
+    runs.count = 1;
+    await guard.ensure();
+    expect(guard.failed()).toBe(false);
+    expect(bootstrapIfNeeded).toHaveBeenCalledTimes(1);
+  });
+
+  it('retryable errors propagate and are tried again next cycle', async () => {
+    vi.mocked(bootstrapIfNeeded).mockRejectedValueOnce(new Error('db down')).mockResolvedValueOnce(undefined);
+    const { guard } = setup(0);
+    await expect(guard.ensure()).rejects.toThrow('db down');
+    expect(guard.failed()).toBe(false);
+    await guard.ensure();
+    await guard.ensure();
+    expect(bootstrapIfNeeded).toHaveBeenCalledTimes(2);
   });
 });
 

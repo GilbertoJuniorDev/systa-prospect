@@ -40,6 +40,19 @@ describe('createNotifier', () => {
     expect(sent[0].html).toContain('—');
   });
 
+  it('bootstrap failure e-mail tells to set INGEST_MONTH and not to run ingest:now', async () => {
+    const { mailer, sent } = fakeMailer();
+    const n = createNotifier({ notifyEmails: ['a@x.com'] }, mailer, () => {});
+    await n.bootstrapFailed('INGEST_MONTH obrigatório no primeiro deploy com base já carregada');
+    expect(sent).toHaveLength(1);
+    expect(sent[0].html).toContain(
+      'Defina INGEST_MONTH (mês já carregado, AAAA-MM) no .env do serviço ingest e reinicie o serviço. ' +
+        'Não rode ingest:now: ele apagaria e recarregaria a base.',
+    );
+    expect(sent[0].html).toContain('INGEST_MONTH obrigatório no primeiro deploy');
+    expect(sent[0].html).not.toContain('Nova tentativa na próxima verificação diária');
+  });
+
   it('escapes dynamic text inserted into html', async () => {
     const { mailer, sent } = fakeMailer();
     const n = createNotifier({ notifyEmails: ['a@x.com'] }, mailer, () => {});
