@@ -45,6 +45,9 @@
     "prisma": "^5.14.0",
     "ts-node": "^10.9.2",
     "typescript": "^5.4.5",
-    "vitest": "^2.1.9"
+    "vitest": "2.1.9"
+  },
+  "overrides": {
+    "rollup": "4.62.5"
   }
 }
