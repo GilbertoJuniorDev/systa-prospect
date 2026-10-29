@@ -173,6 +173,19 @@ export async function registerFiles(
     });
   if (data.length === 0) return;
   await prisma.ingestFile.createMany({ data, skipDuplicates: true });
+
+  // Já registrados e ainda PENDING: tamanho (e tabela) vêm da listagem nova —
+  // o arquivo pode ter sido republicado no servidor. INGESTED/SKIPPED não mudam.
+  const pending = data.filter((d) => d.status === 'PENDING');
+  if (pending.length === 0) return;
+  await prisma.$transaction(
+    pending.map((d) =>
+      prisma.ingestFile.updateMany({
+        where: { runId, fileName: d.fileName, status: 'PENDING' },
+        data: { size: d.size, tableName: d.tableName },
+      }),
+    ),
+  );
 }
 
 export async function pendingFiles(

@@ -144,6 +144,24 @@ describe.skipIf(!url)('ingest state (integração)', () => {
     expect(await pendingFiles(prisma, id)).toEqual([]);
   });
 
+  it('registerFiles refreshes size of PENDING rows from the new listing (INGESTED untouched)', async () => {
+    const id = await createRun(prisma, '2026-10');
+    await registerFiles(prisma, id, [
+      { name: 'Empresas0.zip', href: '/a', size: 100, isDir: false },
+      { name: 'Socios0.zip', href: '/b', size: 50, isDir: false },
+    ]);
+    await prisma.ingestFile.updateMany({ where: { runId: id, fileName: 'Socios0.zip' }, data: { status: 'INGESTED' } });
+
+    await registerFiles(prisma, id, [
+      { name: 'Empresas0.zip', href: '/a', size: 120, isDir: false },
+      { name: 'Socios0.zip', href: '/b', size: 70, isDir: false },
+    ]);
+
+    expect(await pendingFiles(prisma, id)).toEqual([{ fileName: 'Empresas0.zip', size: 120, tableName: 'Empresa' }]);
+    const socio = await prisma.ingestFile.findFirstOrThrow({ where: { runId: id, fileName: 'Socios0.zip' } });
+    expect(Number(socio.size)).toBe(50);
+  });
+
   it('MARK_INGESTED_SQL updates file', async () => {
     const id = await createRun(prisma, '2026-10');
     await registerFiles(prisma, id, [{ name: 'Empresas0.zip', href: '/a', size: 100, isDir: false }]);
