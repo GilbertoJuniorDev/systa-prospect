@@ -8,7 +8,8 @@ vi.mock('../../src/ingest/state', () => ({
   abandonRun: vi.fn(),
 }));
 
-import { tick } from '../../src/ingest/scheduler';
+import { bootstrapOutcome, tick } from '../../src/ingest/scheduler';
+import { PermanentError } from '../../src/ingest/errors';
 import { abandonRun, createRun, getLastSuccess, getOpenRun } from '../../src/ingest/state';
 
 // ─── Fakes ───────────────────────────────────────────────────────────────────
@@ -50,8 +51,9 @@ beforeEach(() => {
 describe('tick', () => {
   it('lock held → none without listing', async () => {
     const { deps, listRemoteMonths, executeRun, queries } = makeDeps({ locked: false });
-    const d = await tick('daily', deps);
+    const { decision: d, runId } = await tick('daily', deps);
     expect(d.kind).toBe('none');
+    expect(runId).toBeUndefined();
     expect(listRemoteMonths).not.toHaveBeenCalled();
     expect(executeRun).not.toHaveBeenCalled();
     expect(queries.some((q) => q.includes('pg_advisory_unlock'))).toBe(false);
@@ -59,7 +61,7 @@ describe('tick', () => {
 
   it('remote listing failure on daily → none', async () => {
     const { deps, executeRun, queries } = makeDeps({ remote: new Error('boom') });
-    const d = await tick('daily', deps);
+    const { decision: d, runId } = await tick('daily', deps);
     expect(d.kind).toBe('none');
     expect(executeRun).not.toHaveBeenCalled();
     expect(createRun).not.toHaveBeenCalled();
@@ -68,8 +70,9 @@ describe('tick', () => {
 
   it('new month → createRun then executeRun, lock released', async () => {
     const { deps, executeRun, queries } = makeDeps({ remote: ['2026-09', '2026-10'] });
-    const d = await tick('daily', deps);
+    const { decision: d, runId } = await tick('daily', deps);
     expect(d).toEqual({ kind: 'start', month: '2026-10' });
+    expect(runId).toBe('run-new');
     expect(createRun).toHaveBeenCalledWith(deps.prisma, '2026-10');
     expect(executeRun).toHaveBeenCalledWith('run-new', deps);
     expect(queries[queries.length - 1]).toContain('pg_advisory_unlock(727011)');
@@ -83,7 +86,7 @@ describe('tick', () => {
     vi.mocked(abandonRun).mockImplementation(async () => { order.push('abandon'); });
     vi.mocked(createRun).mockImplementation(async () => { order.push('create'); return 'run-new'; });
     const { deps, executeRun } = makeDeps({ remote: ['2026-10'] });
-    const d = await tick('daily', deps);
+    const { decision: d, runId } = await tick('daily', deps);
     expect(d).toEqual({ kind: 'start', month: '2026-10', abandonRunId: 'old' });
     expect(abandonRun).toHaveBeenCalledWith(deps.prisma, 'old');
     expect(order).toEqual(['abandon', 'create']);
@@ -95,8 +98,9 @@ describe('tick', () => {
       id: 'r1', month: '2026-10', status: 'RUNNING', errorKind: null, finishedAt: null,
     });
     const { deps, executeRun, listRemoteMonths } = makeDeps();
-    const d = await tick('startup', deps);
+    const { decision: d, runId } = await tick('startup', deps);
     expect(d).toEqual({ kind: 'resume', runId: 'r1' });
+    expect(runId).toBe('r1');
     expect(executeRun).toHaveBeenCalledWith('r1', deps);
     expect(listRemoteMonths).not.toHaveBeenCalled();
   });
@@ -107,5 +111,16 @@ describe('tick', () => {
     await expect(tick('manual', deps, '2026-08')).rejects.toThrow('x');
     expect(createRun).toHaveBeenCalledWith(deps.prisma, '2026-08');
     expect(queries[queries.length - 1]).toContain('pg_advisory_unlock(727011)');
+  });
+});
+
+describe('bootstrapOutcome', () => {
+  it('PermanentError → permanent', () => {
+    expect(bootstrapOutcome(new PermanentError('INGEST_MONTH obrigatório'))).toBe('permanent');
+  });
+
+  it('generic error → retry', () => {
+    expect(bootstrapOutcome(new Error('connection refused'))).toBe('retry');
+    expect(bootstrapOutcome('string error')).toBe('retry');
   });
 });

@@ -77,16 +77,16 @@ services:
       SHARE_TOKEN: ${SHARE_TOKEN}
       INGEST_MONTH: ${INGEST_MONTH}
       SMTP_HOST: ${SMTP_HOST}
-      SMTP_PORT: ${SMTP_PORT}
+      SMTP_PORT: ${SMTP_PORT:-587}
       SMTP_SECURE: ${SMTP_SECURE}
       SMTP_USER: ${SMTP_USER}
       SMTP_PASS: ${SMTP_PASS}
       SMTP_FROM: ${SMTP_FROM}
       INGEST_NOTIFY_EMAIL: ${INGEST_NOTIFY_EMAIL}
-      INGEST_CRON_HOUR: ${INGEST_CRON_HOUR}
-      INGEST_MIN_FREE_GB: ${INGEST_MIN_FREE_GB}
-      INGEST_DISK_FACTOR: ${INGEST_DISK_FACTOR}
-      TZ: ${TZ}
+      INGEST_CRON_HOUR: ${INGEST_CRON_HOUR:-2}
+      INGEST_MIN_FREE_GB: ${INGEST_MIN_FREE_GB:-5}
+      INGEST_DISK_FACTOR: ${INGEST_DISK_FACTOR:-6}
+      TZ: ${TZ:-America/Sao_Paulo}
     volumes:
       - ingest_temp:/app/temp
     command: ['sh', '-c', 'for i in 1 2 3 4 5 6 7 8 9 10; do npx prisma migrate deploy && break; sleep 5; done && node dist/ingest/scheduler.js']

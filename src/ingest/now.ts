@@ -15,14 +15,19 @@ async function main(): Promise<number> {
   const cfg = loadIngestConfig(process.env);
   const prisma = new PrismaClient();
   try {
-    const decision = await withFreshDb(cfg, prisma, (deps) => tick('manual', deps, forcedMonth));
-    if (decision.kind === 'none') return 0;
+    const { decision, runId } = await withFreshDb(cfg, prisma, (deps) =>
+      tick('manual', deps, forcedMonth),
+    );
+    if (decision.kind === 'none' || !runId) {
+      if (decision.kind === 'none') console.error(`Nada a fazer: ${decision.reason}`);
+      return 0;
+    }
 
-    const run = await prisma.ingestRun.findFirst({
-      orderBy: { startedAt: 'desc' },
+    const run = await prisma.ingestRun.findUnique({
+      where: { id: runId },
       select: { id: true, month: true, status: true },
     });
-    console.log(`Run ${run?.id} (mês ${run?.month}): ${run?.status}`);
+    console.log(`Run ${runId} (mês ${run?.month}): ${run?.status}`);
     return run?.status === 'SUCCESS' ? 0 : 1;
   } finally {
     await prisma.$disconnect().catch(() => {});
