@@ -45,6 +45,25 @@ export async function dropSecondaryIndexes(client: Client): Promise<void> {
   }
 }
 
+/**
+ * Prepara a base para a carga numa única transação: TRUNCATE, DROP dos índices
+ * secundários e `prepared=true` no run. Ou tudo acontece, ou nada — nunca fica
+ * base truncada com run "não preparado" (que poderia ser abandonado).
+ */
+export async function prepareBase(client: Client, runId: string): Promise<void> {
+  await client.query('BEGIN');
+  try {
+    await truncateReceita(client);
+    await dropSecondaryIndexes(client);
+    const r = await client.query(`UPDATE "IngestRun" SET prepared = true WHERE id = $1`, [runId]);
+    if (r.rowCount !== 1) throw new Error(`IngestRun ${runId} não encontrado ao preparar a base`);
+    await client.query('COMMIT');
+  } catch (err) {
+    await client.query('ROLLBACK').catch(() => {});
+    throw err;
+  }
+}
+
 /** Cria os índices ausentes da tabela (checando disco antes de cada um) e roda ANALYZE. */
 export async function buildIndexes(
   client: Client,

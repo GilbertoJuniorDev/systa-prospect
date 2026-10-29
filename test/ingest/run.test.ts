@@ -7,10 +7,10 @@ import iconv from 'iconv-lite';
 import type { Client } from 'pg';
 import { PrismaClient } from '@prisma/client';
 import { executeRun, extractZip, type RunDeps } from '../../src/ingest/run';
-import { connect, buildIndexes } from '../../src/ingest/db';
+import { connect, buildIndexes, prepareBase } from '../../src/ingest/db';
 import { loadCsv } from '../../src/ingest/loader';
 import { RECEITA_TABLES, SECONDARY_INDEXES, TABLE_ORDER } from '../../src/ingest/tables';
-import { createRun, registerFiles } from '../../src/ingest/state';
+import { createRun, latestRunStatus, registerFiles } from '../../src/ingest/state';
 import { HttpError } from '../../src/ingest/errors';
 import type { IngestConfig } from '../../src/ingest/config';
 import type { DavEntry } from '../../src/ingest/webdav';
@@ -140,6 +140,7 @@ describe.skipIf(!url)('executeRun (integração)', () => {
 
   let downloads: string[];
   let loadedTables: string[];
+  let sleeps: number[];
   let notes: { started: string[]; succeeded: any[]; failed: any[] };
 
   const silent = () => {};
@@ -177,6 +178,7 @@ describe.skipIf(!url)('executeRun (integração)', () => {
       bootstrapMonth: null,
       minFreeBytes: 0,
       diskFactor: 6,
+      stableWaitMs: 300_000,
       notifyEmails: [],
       databaseUrl: url!,
     };
@@ -222,6 +224,9 @@ describe.skipIf(!url)('executeRun (integração)', () => {
       freeBytes: async () => 1e15,
       notifier: fakeNotifier,
       log: (m) => logs.push(m),
+      sleep: async (ms) => {
+        sleeps.push(ms);
+      },
       ...over,
     };
   }
@@ -240,6 +245,7 @@ describe.skipIf(!url)('executeRun (integração)', () => {
     logs = [];
     downloads = [];
     loadedTables = [];
+    sleeps = [];
     notes = { started: [], succeeded: [], failed: [] };
   });
 
@@ -586,5 +592,193 @@ describe.skipIf(!url)('executeRun (integração)', () => {
   it('never rejects, even when the failure path fails', async () => {
     await expect(executeRun('run-inexistente', makeDeps())).resolves.toBeUndefined();
     expect(logs.length).toBeGreaterThan(0);
+  });
+
+  // ─── Base suja / preparo atômico (C1) ──────────────────────────────────────
+
+  async function setRun(id: string, data: Record<string, unknown>) {
+    await prisma.ingestRun.update({ where: { id }, data });
+  }
+
+  it('dirty base: newer month with incomplete listing FAILS (not ABANDONED) and keeps maintenance', async () => {
+    const ok = await createRun(prisma, '2026-08');
+    await setRun(ok, {
+      status: 'SUCCESS',
+      prepared: true,
+      startedAt: new Date('2026-08-20T00:00:00Z'),
+      finishedAt: new Date('2026-08-21T00:00:00Z'),
+    });
+    // A truncou a base e falhou; o agendador o abandona ao começar B.
+    const a = await createRun(prisma, '2026-09');
+    await setRun(a, { status: 'ABANDONED', prepared: true, startedAt: new Date('2026-09-20T00:00:00Z') });
+    const b = await createRun(prisma, MONTH);
+    await setRun(b, { startedAt: new Date('2026-10-20T00:00:00Z') });
+    await insertEmpresa('99999999');
+    const listing = DEFAULT_LISTING.filter((e) => e.name !== 'Socios0.zip');
+
+    await executeRun(b, makeDeps({ listMonthFiles: async () => listing }));
+
+    const run = await getRun(b);
+    expect(run.status).toBe('FAILED');
+    expect(run.errorKind).toBe('TEMPORARY');
+    expect(run.prepared).toBe(false);
+    expect(run.error).toBe('mês incompleto no servidor: faltam Socio');
+    expect((await latestRunStatus(prisma)).maintenance).toBe(true);
+    expect(await count('Empresa')).toBe(1);
+    expect(notes.failed).toHaveLength(1);
+    expect(notes.failed[0]).toMatchObject({ kind: 'TEMPORARY' });
+  });
+
+  it('dirty base: prepared FAILED run and no SUCCESS at all also blocks abandoning', async () => {
+    const a = await createRun(prisma, '2026-09');
+    await setRun(a, { status: 'FAILED', prepared: true, startedAt: new Date('2026-09-20T00:00:00Z') });
+    const b = await createRun(prisma, MONTH);
+    await setRun(b, { startedAt: new Date('2026-10-20T00:00:00Z') });
+    const listMonthFiles = async () => {
+      throw new HttpError(503, 'PROPFIND retornou HTTP 503');
+    };
+
+    await executeRun(b, makeDeps({ listMonthFiles }));
+
+    const run = await getRun(b);
+    expect(run.status).toBe('FAILED');
+    expect(run.errorKind).toBe('TEMPORARY');
+  });
+
+  it('clean base: prepared run older than the last SUCCESS does not block abandoning', async () => {
+    const a = await createRun(prisma, '2026-08');
+    await setRun(a, { status: 'ABANDONED', prepared: true, startedAt: new Date('2026-08-20T00:00:00Z') });
+    const ok = await createRun(prisma, '2026-09');
+    await setRun(ok, {
+      status: 'SUCCESS',
+      prepared: true,
+      startedAt: new Date('2026-09-20T00:00:00Z'),
+      finishedAt: new Date('2026-09-21T00:00:00Z'),
+    });
+    const b = await createRun(prisma, MONTH);
+    await setRun(b, { startedAt: new Date('2026-10-20T00:00:00Z') });
+    const listing = DEFAULT_LISTING.filter((e) => e.name !== 'Socios0.zip');
+
+    await executeRun(b, makeDeps({ listMonthFiles: async () => listing }));
+
+    expect((await getRun(b)).status).toBe('ABANDONED');
+    expect(notes.failed).toEqual([]);
+  });
+
+  it('prepareBase is atomic: failing to mark the run rolls back truncate and index drop', async () => {
+    await insertEmpresa('99999999');
+    const before = (await indexNames()).sort();
+
+    await expect(prepareBase(db, 'run-inexistente')).rejects.toThrow();
+
+    expect(await count('Empresa')).toBe(1);
+    expect((await indexNames()).sort()).toEqual(before);
+  });
+
+  it('crash after the truncate transaction resumes without truncating', async () => {
+    const runId = await createRun(prisma, MONTH);
+    let crash = true;
+    const notifier: Notifier = {
+      ...fakeNotifier,
+      async started(month) {
+        notes.started.push(month);
+        if (crash) throw new Error('processo caiu');
+      },
+    };
+
+    await executeRun(runId, makeDeps({ notifier }));
+    let run = await getRun(runId);
+    expect(run.status).toBe('FAILED');
+    expect(run.prepared).toBe(true);
+    expect(downloads).toEqual([]);
+
+    crash = false;
+    await insertEmpresa('99999999');
+    sleeps = [];
+    await executeRun(runId, makeDeps({ notifier }));
+
+    run = await getRun(runId);
+    expect(run.status).toBe('SUCCESS');
+    // Sem novo TRUNCATE: a linha inserida depois do preparo continua lá.
+    const pre = await db.query(`SELECT 1 FROM "Empresa" WHERE cnpj_base = '99999999'`);
+    expect(pre.rowCount).toBe(1);
+    expect(notes.started).toEqual([MONTH]);
+    expect(sleeps).toEqual([]);
+  });
+
+  // ─── Completude/estabilidade da listagem (I4) e espera da manutenção (M1) ──
+
+  it('gap in shards on a fresh run is incomplete (abandoned on clean base)', async () => {
+    const runId = await createRun(prisma, MONTH);
+    const listing = [...DEFAULT_LISTING, entry('Empresas2.zip'), entry('Empresas4.zip')];
+
+    await executeRun(runId, makeDeps({ listMonthFiles: async () => listing }));
+
+    expect((await getRun(runId)).status).toBe('ABANDONED');
+    expect(logs.some((l) => l.includes('faltam partes de Empresa: 1, 3'))).toBe(true);
+    expect(downloads).toEqual([]);
+  });
+
+  it('gap in shards on a prepared run fails', async () => {
+    const runId = await createRun(prisma, MONTH);
+    await setRun(runId, { prepared: true });
+    const listing = DEFAULT_LISTING.filter((e) => e.name !== 'Socios0.zip').concat(entry('Socios1.zip'));
+
+    await executeRun(runId, makeDeps({ listMonthFiles: async () => listing }));
+
+    const run = await getRun(runId);
+    expect(run.status).toBe('FAILED');
+    expect(run.error).toBe('mês incompleto no servidor: faltam partes de Socio: 0');
+  });
+
+  it('contiguous shards are complete', async () => {
+    const runId = await createRun(prisma, MONTH);
+    const listing = [...DEFAULT_LISTING, entry('Empresas1.zip')];
+    const extract = async (zip: string, destDir: string) =>
+      fakeExtract(
+        path.basename(zip) === 'Empresas1.zip' ? path.join(path.dirname(zip), 'Empresas0.zip') : zip,
+        destDir,
+      );
+
+    await executeRun(runId, makeDeps({ listMonthFiles: async () => listing, extractZip: extract }));
+
+    expect((await getRun(runId)).status).toBe('SUCCESS');
+    expect(downloads).toContain('Empresas1.zip');
+  });
+
+  it('listings that differ after the stability wait are incomplete', async () => {
+    await insertEmpresa('99999999');
+    const runId = await createRun(prisma, MONTH);
+    let calls = 0;
+    const listMonthFiles = async () => {
+      calls++;
+      return calls === 1
+        ? DEFAULT_LISTING
+        : DEFAULT_LISTING.map((e) => (e.name === 'Socios0.zip' ? { ...e, size: ZIP_SIZE + 1 } : e));
+    };
+
+    await executeRun(runId, makeDeps({ listMonthFiles }));
+
+    expect(calls).toBe(2);
+    expect(sleeps).toEqual([300_000]);
+    expect((await getRun(runId)).status).toBe('ABANDONED');
+    expect(logs.some((l) => l.includes('pasta do mês ainda mudando no servidor'))).toBe(true);
+    expect(await count('Empresa')).toBe(1);
+  });
+
+  it('fresh run waits for stability and for the API status cache before truncating', async () => {
+    await insertEmpresa('99999999');
+    const runId = await createRun(prisma, MONTH);
+    const seen: { status: string; empresas: number }[] = [];
+    const sleep = async (ms: number) => {
+      sleeps.push(ms);
+      seen.push({ status: (await getRun(runId)).status, empresas: await count('Empresa') });
+    };
+
+    await executeRun(runId, makeDeps({ sleep }));
+
+    expect((await getRun(runId)).status).toBe('SUCCESS');
+    expect(sleeps).toEqual([300_000, 35_000]);
+    expect(seen.every((x) => x.status === 'RUNNING' && x.empresas === 1)).toBe(true);
   });
 });

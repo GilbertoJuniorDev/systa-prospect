@@ -52,6 +52,27 @@ export async function getOpenRun(prisma: PrismaClient): Promise<OpenRun | null> 
   };
 }
 
+/**
+ * Base "suja" = algum run (qualquer status, inclusive ABANDONED/FAILED) chegou a
+ * truncá-la (prepared=true) depois do último SUCCESS. Nesse caso a base atual
+ * não é mais a do último mês carregado e nenhum run pode ser abandonado em silêncio.
+ */
+export async function isBaseDirty(prisma: PrismaClient): Promise<boolean> {
+  const lastSuccess = await prisma.ingestRun.findFirst({
+    where: { status: 'SUCCESS' },
+    orderBy: { startedAt: 'desc' },
+    select: { startedAt: true },
+  });
+  const dirty = await prisma.ingestRun.findFirst({
+    where: {
+      prepared: true,
+      ...(lastSuccess ? { startedAt: { gt: lastSuccess.startedAt } } : {}),
+    },
+    select: { id: true },
+  });
+  return dirty !== null;
+}
+
 export async function latestRunStatus(
   prisma: PrismaClient,
 ): Promise<{ month: string | null; loadedAt: Date | null; maintenance: boolean }> {

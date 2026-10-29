@@ -10,6 +10,8 @@ export interface IngestConfig {
   bootstrapMonth: string | null;
   minFreeBytes: number;
   diskFactor: number;
+  /** Intervalo entre as duas listagens que confirmam que a pasta do mês parou de mudar. */
+  stableWaitMs: number;
   notifyEmails: string[];
   databaseUrl: string;
 }
@@ -62,6 +64,7 @@ export function loadIngestConfig(env: NodeJS.ProcessEnv): IngestConfig {
     bootstrapMonth: monthRaw ?? null,
     minFreeBytes: positiveNumber(env.INGEST_MIN_FREE_GB, 5, 'INGEST_MIN_FREE_GB') * GIB,
     diskFactor: positiveNumber(env.INGEST_DISK_FACTOR, 6, 'INGEST_DISK_FACTOR'),
+    stableWaitMs: positiveNumber(env.INGEST_STABLE_WAIT_MS, 300_000, 'INGEST_STABLE_WAIT_MS'),
     notifyEmails: (env.INGEST_NOTIFY_EMAIL ?? '')
       .split(',')
       .map((e) => e.trim())

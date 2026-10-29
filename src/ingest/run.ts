@@ -4,7 +4,7 @@ import type { PrismaClient } from '@prisma/client';
 import type { Client } from 'pg';
 import unzipper from 'unzipper';
 import type { IngestConfig } from './config';
-import { buildIndexes, dropSecondaryIndexes, truncateReceita } from './db';
+import { buildIndexes, prepareBase } from './db';
 import { assertSpace, freeBytes, requiredForZip } from './disk';
 import type { downloadFile } from './downloader';
 import { classifyError, PermanentError } from './errors';
@@ -12,9 +12,9 @@ import type { loadCsv } from './loader';
 import type { Notifier } from './notify';
 import {
   abandonRun,
+  isBaseDirty,
   MARK_INGESTED_SQL,
   markFailed,
-  markPrepared,
   markRunning,
   markSuccess,
   pendingFiles,
@@ -38,11 +38,17 @@ export interface RunDeps {
   notifier: Notifier;
   log: (m: string) => void;
   now?: () => Date;
+  /** Substituível em testes (espera de estabilidade e de propagação da manutenção). */
+  sleep?: (ms: number) => Promise<void>;
 }
 
 type PendingFile = { fileName: string; size: number; tableName: string };
 
 const MAX_ZIP_SIZE = 20 * 1024 * 1024 * 1024; // 20 GB
+/** TTL do cache de status da API (30 s) + folga: a API já responde 503 antes do TRUNCATE. */
+const MAINTENANCE_PROPAGATION_MS = 35_000;
+
+const realSleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
 // ─── Descompactação ──────────────────────────────────────────────────────────
 
@@ -194,18 +200,52 @@ async function ingestZip(
 
 // ─── Run ─────────────────────────────────────────────────────────────────────
 
-/** Uma tabela só entra com pelo menos um ZIP registrável; base pela metade não sobe. */
+/**
+ * Uma tabela só entra com pelo menos um ZIP registrável; base pela metade não sobe.
+ * Grupos fatiados (Empresas0..N, Estabelecimentos0..N, Socios0..N) precisam ter
+ * as partes contíguas de 0 até a maior.
+ */
 function assertComplete(entries: DavEntry[]): void {
-  const present = new Set(
-    entries
-      .filter((e) => !e.isDir && e.size !== null)
-      .map((e) => zipTable(e.name))
-      .filter((t): t is string => t !== null),
-  );
+  const shards = new Map<string, Set<number>>();
+  const present = new Set<string>();
+  for (const e of entries) {
+    if (e.isDir || e.size === null) continue;
+    const table = zipTable(e.name);
+    if (table === null) continue;
+    present.add(table);
+    const digits = /(\d+)\.zip$/i.exec(e.name);
+    if (digits) {
+      if (!shards.has(table)) shards.set(table, new Set());
+      shards.get(table)!.add(Number(digits[1]));
+    }
+  }
+
   const missing = TABLE_ORDER.filter((t) => !present.has(t));
   if (missing.length > 0) {
     throw new PermanentError(`mês incompleto no servidor: faltam ${missing.join(', ')}`);
   }
+
+  const gaps: string[] = [];
+  for (const table of TABLE_ORDER) {
+    const indices = shards.get(table);
+    if (!indices) continue;
+    const max = Math.max(...indices);
+    const absent: number[] = [];
+    for (let i = 0; i <= max; i++) if (!indices.has(i)) absent.push(i);
+    if (absent.length > 0) gaps.push(`faltam partes de ${table}: ${absent.join(', ')}`);
+  }
+  if (gaps.length > 0) {
+    throw new PermanentError(`mês incompleto no servidor: ${gaps.join('; ')}`);
+  }
+}
+
+/** Assinatura nome+tamanho dos arquivos da listagem, para comparar duas listagens. */
+function listingSignature(entries: DavEntry[]): string {
+  return entries
+    .filter((e) => !e.isDir)
+    .map((e) => `${e.name}:${e.size ?? ''}`)
+    .sort()
+    .join('|');
 }
 
 /** Registros efetivamente inseridos (rows − discarded) por tabela, na ordem de carga. */
@@ -226,12 +266,15 @@ async function rowsByTable(prisma: PrismaClient, runId: string): Promise<Record<
 /**
  * Executa (ou retoma) um run de ingestão. Nunca rejeita: qualquer erro é
  * classificado, gravado com markFailed e notificado (respeitando o limite de e-mails).
- * Run ainda não preparado cuja listagem falha ou vem incompleta é abandonado
- * sem tocar na base (a API continua servindo o mês anterior).
+ * Run ainda não preparado cuja listagem falha, vem incompleta ou ainda está mudando
+ * é abandonado sem tocar na base (a API continua servindo o mês anterior) — desde
+ * que a base esteja limpa. Se um run anterior já a truncou (isBaseDirty), a falha
+ * segue o caminho normal como TEMPORARY: manutenção continua, retry em 30 min.
  */
 export async function executeRun(runId: string, deps: RunDeps): Promise<void> {
   const { cfg, prisma, db, notifier, log } = deps;
   const now = deps.now ?? (() => new Date());
+  const sleep = deps.sleep ?? realSleep;
   let month = '';
   let phase: string | null = null;
   let succeeded = false;
@@ -246,11 +289,28 @@ export async function executeRun(runId: string, deps: RunDeps): Promise<void> {
 
     let entries: DavEntry[];
     if (!run.prepared) {
-      // Lista e valida ANTES de truncar: sem mês completo, a base atual fica intacta.
+      // Lista e valida ANTES de truncar: sem mês completo e estável, a base atual fica intacta.
       try {
+        const first = await deps.listMonthFiles(cfg, month);
+        assertComplete(first);
+        await sleep(cfg.stableWaitMs);
         entries = await deps.listMonthFiles(cfg, month);
+        if (listingSignature(entries) !== listingSignature(first)) {
+          throw new PermanentError('pasta do mês ainda mudando no servidor');
+        }
         assertComplete(entries);
       } catch (err) {
+        let dirty = true;
+        try {
+          dirty = await isBaseDirty(prisma);
+        } catch (dirtyErr) {
+          log(`Falha ao verificar o estado da base: ${errorMessage(dirtyErr)}`);
+        }
+        if (dirty) {
+          log(`Run ${runId} (mês ${month}): base já truncada por um run anterior; não abandona`);
+          await reportFailure(runId, month, phase, err, deps, 'TEMPORARY');
+          return;
+        }
         log(`Run ${runId} (mês ${month}) abandonado antes de preparar: ${errorMessage(err)}`);
         try {
           await abandonRun(prisma, runId);
@@ -260,10 +320,10 @@ export async function executeRun(runId: string, deps: RunDeps): Promise<void> {
         return;
       }
 
+      // A API só lê o status a cada 30 s: espera ela entrar em manutenção antes do TRUNCATE.
+      await sleep(MAINTENANCE_PROPAGATION_MS);
       cleanDir(cfg.tempDir);
-      await truncateReceita(db);
-      await dropSecondaryIndexes(db);
-      await markPrepared(prisma, runId);
+      await prepareBase(db, runId);
       await notifier.started(month);
     } else {
       entries = await deps.listMonthFiles(cfg, month);
@@ -313,10 +373,11 @@ async function reportFailure(
   phase: string | null,
   err: unknown,
   deps: RunDeps,
+  forcedKind?: 'TEMPORARY' | 'PERMANENT',
 ): Promise<void> {
   const { cfg, prisma, notifier, log } = deps;
   try {
-    const kind = classifyError(err);
+    const kind = forcedKind ?? classifyError(err);
     const message = errorMessage(err);
     log(`Run ${runId} falhou (${kind}): ${message}`);
 
