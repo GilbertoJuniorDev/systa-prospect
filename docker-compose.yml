@@ -67,6 +67,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+    restart: unless-stopped
     depends_on:
       postgres:
         condition: service_healthy
@@ -75,10 +76,20 @@ services:
       DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}?schema=public
       SHARE_TOKEN: ${SHARE_TOKEN}
       INGEST_MONTH: ${INGEST_MONTH}
+      SMTP_HOST: ${SMTP_HOST}
+      SMTP_PORT: ${SMTP_PORT}
+      SMTP_SECURE: ${SMTP_SECURE}
+      SMTP_USER: ${SMTP_USER}
+      SMTP_PASS: ${SMTP_PASS}
+      SMTP_FROM: ${SMTP_FROM}
+      INGEST_NOTIFY_EMAIL: ${INGEST_NOTIFY_EMAIL}
+      INGEST_CRON_HOUR: ${INGEST_CRON_HOUR}
+      INGEST_MIN_FREE_GB: ${INGEST_MIN_FREE_GB}
+      INGEST_DISK_FACTOR: ${INGEST_DISK_FACTOR}
+      TZ: ${TZ}
     volumes:
       - ingest_temp:/app/temp
-    command: ['sh', '-c', 'node dist/download.js && node dist/ingest.js']
-    profiles: ['ingest']
+    command: ['sh', '-c', 'for i in 1 2 3 4 5 6 7 8 9 10; do npx prisma migrate deploy && break; sleep 5; done && node dist/ingest/scheduler.js']
 
 volumes:
   pgdata:
