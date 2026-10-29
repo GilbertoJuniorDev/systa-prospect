@@ -94,4 +94,15 @@ describe('nextWakeUp', () => {
   it('ignores PERMANENT failures', () => {
     expect(nextWakeUp(new Date('2026-10-29T06:10:00Z'), daily, { ...failedTemp, errorKind: 'PERMANENT' })).toEqual({ at: daily, trigger: 'daily' });
   });
+  it('RUNNING run left behind (markFailed failed) retries in 30 min', () => {
+    const running = { ...failedTemp, status: 'RUNNING' as const, errorKind: null, finishedAt: null };
+    expect(nextWakeUp(new Date('2026-10-29T06:10:00Z'), daily, running)).toEqual({
+      at: new Date('2026-10-29T06:40:00Z'),
+      trigger: 'retry',
+    });
+  });
+  it('RUNNING retry never goes past the daily run', () => {
+    const running = { ...failedTemp, status: 'RUNNING' as const, errorKind: null, finishedAt: null };
+    expect(nextWakeUp(new Date('2026-10-30T04:50:00Z'), daily, running)).toEqual({ at: daily, trigger: 'daily' });
+  });
 });

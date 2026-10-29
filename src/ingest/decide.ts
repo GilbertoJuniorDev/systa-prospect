@@ -105,6 +105,11 @@ export function nextWakeUp(
   daily: Date,
   openRun: OpenRun | null,
 ): { at: Date; trigger: 'daily' | 'retry' } {
+  // Ciclo terminou com run ainda RUNNING (ex.: markFailed não gravou): retoma em 30 min.
+  if (openRun && openRun.status === 'RUNNING') {
+    const retryAt = new Date(now.getTime() + RETRY_MS);
+    if (retryAt.getTime() < daily.getTime()) return { at: retryAt, trigger: 'retry' };
+  }
   if (openRun && openRun.status === 'FAILED' && openRun.errorKind === 'TEMPORARY') {
     const retryAt = new Date((openRun.finishedAt ?? now).getTime() + RETRY_MS);
     if (retryAt.getTime() < daily.getTime()) return { at: retryAt, trigger: 'retry' };
