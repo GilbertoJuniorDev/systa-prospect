@@ -64,6 +64,15 @@ describe('loadIngestConfig', () => {
     expect(() => loadIngestConfig({ ...base, INGEST_DISK_FACTOR: 'abc' })).toThrow();
   });
 
+  it('rejects invalid TZ', () => {
+    expect(() => loadIngestConfig({ ...base, TZ: 'Marte/Olympus' })).toThrow(/TZ inválido/);
+  });
+
+  it('reads INGEST_STABLE_WAIT_MS (default 300000)', () => {
+    expect(loadIngestConfig(base).stableWaitMs).toBe(300_000);
+    expect(loadIngestConfig({ ...base, INGEST_STABLE_WAIT_MS: '1000' }).stableWaitMs).toBe(1000);
+  });
+
   it('rejects non-positive min free GB', () => {
     expect(() => loadIngestConfig({ ...base, INGEST_MIN_FREE_GB: '0' })).toThrow();
     expect(() => loadIngestConfig({ ...base, INGEST_MIN_FREE_GB: 'NaN' })).toThrow();

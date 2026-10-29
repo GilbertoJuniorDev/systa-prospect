@@ -56,11 +56,18 @@ export function loadIngestConfig(env: NodeJS.ProcessEnv): IngestConfig {
     throw new Error(`INGEST_MONTH inválido: "${monthRaw}" (esperado AAAA-MM)`);
   }
 
+  const timeZone = optional(env.TZ) ?? 'America/Sao_Paulo';
+  try {
+    new Intl.DateTimeFormat('en-US', { timeZone });
+  } catch {
+    throw new Error(`TZ inválido: "${timeZone}" (esperado fuso IANA, ex.: America/Sao_Paulo)`);
+  }
+
   return {
     shareToken,
     tempDir: path.resolve('./temp'),
     cronHour,
-    timeZone: optional(env.TZ) ?? 'America/Sao_Paulo',
+    timeZone,
     bootstrapMonth: monthRaw ?? null,
     minFreeBytes: positiveNumber(env.INGEST_MIN_FREE_GB, 5, 'INGEST_MIN_FREE_GB') * GIB,
     diskFactor: positiveNumber(env.INGEST_DISK_FACTOR, 6, 'INGEST_DISK_FACTOR'),
