@@ -3,6 +3,12 @@ import { PrismaClient } from '@prisma/client';
 import { loadIngestConfig } from './config';
 import { tick, withFreshDb } from './scheduler';
 
+/**
+ * Uso: `npm run ingest:now` (mesma decisão do ciclo diário) ou
+ * `npm run ingest:now -- AAAA-MM` (força um mês). Atenção: forçar um mês mais
+ * antigo que o mais novo publicado é temporário — o próximo ciclo diário do
+ * agendador vê o mês mais novo no servidor e o carrega por cima.
+ */
 const MONTH_RE = /^\d{4}-(0[1-9]|1[0-2])$/;
 
 async function main(): Promise<number> {
@@ -13,6 +19,12 @@ async function main(): Promise<number> {
   }
 
   const cfg = loadIngestConfig(process.env);
+  if (forcedMonth !== undefined) {
+    console.log(
+      `Forçando o mês ${forcedMonth}. Se houver mês mais novo no servidor, ` +
+        'o próximo ciclo diário do agendador vai substituí-lo.',
+    );
+  }
   const prisma = new PrismaClient();
   try {
     const { decision, runId } = await withFreshDb(cfg, prisma, (deps) =>
