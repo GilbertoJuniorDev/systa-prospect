@@ -11,6 +11,7 @@ import { classifyError, PermanentError } from './errors';
 import type { loadCsv } from './loader';
 import type { Notifier } from './notify';
 import {
+  abandonRun,
   MARK_INGESTED_SQL,
   markFailed,
   markPrepared,
@@ -20,8 +21,8 @@ import {
   registerFiles,
   setPhase,
 } from './state';
-import { configForCsv, TABLE_ORDER, type TabelaConfig } from './tables';
-import { davAuthHeader, davMonthUrl, type listMonthFiles } from './webdav';
+import { configForCsv, TABLE_ORDER, zipTable, type TabelaConfig } from './tables';
+import { davAuthHeader, davMonthUrl, type DavEntry, type listMonthFiles } from './webdav';
 
 // ─── Tipos ───────────────────────────────────────────────────────────────────
 
@@ -114,9 +115,12 @@ async function ingestZip(
   const zipPath = path.join(cfg.tempDir, file.fileName);
   const extractDir = path.join(cfg.tempDir, runId);
 
-  // Disco: um ZIP já completo no disco não precisa de espaço para download.
-  if (fileSize(zipPath) !== file.size) {
-    assertSpace(await deps.freeBytes(cfg.tempDir), requiredForZip(file.size, cfg), file.fileName);
+  // Disco: um ZIP já completo no disco só precisa de espaço para a extração.
+  const free = await deps.freeBytes(cfg.tempDir);
+  if (fileSize(zipPath) === file.size) {
+    assertSpace(free, Math.ceil(file.size * (cfg.diskFactor - 1)) + cfg.minFreeBytes, file.fileName);
+  } else {
+    assertSpace(free, requiredForZip(file.size, cfg), file.fileName);
   }
 
   await deps.downloadFile({
@@ -129,7 +133,15 @@ async function ingestZip(
 
   // Sobras de uma extração interrompida não podem ser carregadas de novo.
   fs.rmSync(extractDir, { recursive: true, force: true });
-  const csvs = await deps.extractZip(zipPath, extractDir);
+  let csvs: string[];
+  try {
+    csvs = await deps.extractZip(zipPath, extractDir);
+  } catch (err) {
+    // ZIP corrompido: apaga para a próxima tentativa baixar de novo.
+    fs.rmSync(extractDir, { recursive: true, force: true });
+    fs.rmSync(zipPath, { force: true });
+    throw err;
+  }
   if (csvs.length === 0) {
     throw new PermanentError(`nenhum arquivo encontrado em ${file.fileName}`);
   }
@@ -182,16 +194,31 @@ async function ingestZip(
 
 // ─── Run ─────────────────────────────────────────────────────────────────────
 
+/** Uma tabela só entra com pelo menos um ZIP registrável; base pela metade não sobe. */
+function assertComplete(entries: DavEntry[]): void {
+  const present = new Set(
+    entries
+      .filter((e) => !e.isDir && e.size !== null)
+      .map((e) => zipTable(e.name))
+      .filter((t): t is string => t !== null),
+  );
+  const missing = TABLE_ORDER.filter((t) => !present.has(t));
+  if (missing.length > 0) {
+    throw new PermanentError(`mês incompleto no servidor: faltam ${missing.join(', ')}`);
+  }
+}
+
+/** Registros efetivamente inseridos (rows − discarded) por tabela, na ordem de carga. */
 async function rowsByTable(prisma: PrismaClient, runId: string): Promise<Record<string, number>> {
   const groups = await prisma.ingestFile.groupBy({
     by: ['tableName'],
     where: { runId, status: 'INGESTED' },
-    _sum: { rows: true },
+    _sum: { rows: true, discarded: true },
   });
   const result: Record<string, number> = {};
   for (const table of TABLE_ORDER) {
     const g = groups.find((x) => x.tableName === table);
-    if (g) result[table] = g._sum.rows ?? 0;
+    if (g) result[table] = (g._sum.rows ?? 0) - (g._sum.discarded ?? 0);
   }
   return result;
 }
@@ -199,6 +226,8 @@ async function rowsByTable(prisma: PrismaClient, runId: string): Promise<Record<
 /**
  * Executa (ou retoma) um run de ingestão. Nunca rejeita: qualquer erro é
  * classificado, gravado com markFailed e notificado (respeitando o limite de e-mails).
+ * Run ainda não preparado cuja listagem falha ou vem incompleta é abandonado
+ * sem tocar na base (a API continua servindo o mês anterior).
  */
 export async function executeRun(runId: string, deps: RunDeps): Promise<void> {
   const { cfg, prisma, db, notifier, log } = deps;
@@ -215,20 +244,33 @@ export async function executeRun(runId: string, deps: RunDeps): Promise<void> {
     await markRunning(prisma, runId);
     log(`Run ${runId} (mês ${month}) ${run.prepared ? 'retomado' : 'iniciado'}`);
 
+    let entries: DavEntry[];
     if (!run.prepared) {
+      // Lista e valida ANTES de truncar: sem mês completo, a base atual fica intacta.
+      try {
+        entries = await deps.listMonthFiles(cfg, month);
+        assertComplete(entries);
+      } catch (err) {
+        log(`Run ${runId} (mês ${month}) abandonado antes de preparar: ${errorMessage(err)}`);
+        try {
+          await abandonRun(prisma, runId);
+        } catch (abandonErr) {
+          log(`Falha ao abandonar o run ${runId}: ${errorMessage(abandonErr)}`);
+        }
+        return;
+      }
+
       cleanDir(cfg.tempDir);
       await truncateReceita(db);
       await dropSecondaryIndexes(db);
       await markPrepared(prisma, runId);
       await notifier.started(month);
+    } else {
+      entries = await deps.listMonthFiles(cfg, month);
+      assertComplete(entries);
     }
 
-    await registerFiles(prisma, runId, await deps.listMonthFiles(cfg, month));
-
-    const known = await prisma.ingestFile.count({ where: { runId, tableName: { not: null } } });
-    if (known === 0) {
-      throw new PermanentError(`nenhum arquivo da Receita encontrado no mês ${month}`);
-    }
+    await registerFiles(prisma, runId, entries);
 
     const pending = await pendingFiles(prisma, runId);
     cleanDir(cfg.tempDir, new Set(pending.map((f) => f.fileName)));
@@ -240,6 +282,7 @@ export async function executeRun(runId: string, deps: RunDeps): Promise<void> {
         await ingestZip(runId, month, file, deps);
       }
       phase = `${table}: índices`;
+      await setPhase(prisma, runId, phase);
       await buildIndexes(db, table, cfg, cfg.tempDir, log);
     }
 
@@ -260,22 +303,40 @@ export async function executeRun(runId: string, deps: RunDeps): Promise<void> {
       log(`Run ${runId} concluído, mas a finalização falhou: ${errorMessage(err)}`);
       return;
     }
+    await reportFailure(runId, month, phase, err, deps);
+  }
+}
+
+async function reportFailure(
+  runId: string,
+  month: string,
+  phase: string | null,
+  err: unknown,
+  deps: RunDeps,
+): Promise<void> {
+  const { cfg, prisma, notifier, log } = deps;
+  try {
+    const kind = classifyError(err);
+    const message = errorMessage(err);
+    log(`Run ${runId} falhou (${kind}): ${message}`);
+
+    // Banco fora do ar não pode silenciar o alerta: sem markFailed, avisa mesmo assim.
+    let shouldEmail = true;
     try {
-      const kind = classifyError(err);
-      const message = errorMessage(err);
-      log(`Run ${runId} falhou (${kind}): ${message}`);
-      const { shouldEmail } = await markFailed(prisma, runId, message, kind);
-      if (shouldEmail) {
-        let free: number | null = null;
-        try {
-          free = await deps.freeBytes(cfg.tempDir);
-        } catch {
-          free = null;
-        }
-        await notifier.failed({ month, phase, error: message, kind, freeBytes: free });
-      }
-    } catch (failErr) {
-      log(`Falha ao registrar erro do run ${runId}: ${errorMessage(failErr)}`);
+      ({ shouldEmail } = await markFailed(prisma, runId, message, kind));
+    } catch (markErr) {
+      log(`Falha ao gravar erro do run ${runId}: ${errorMessage(markErr)}`);
     }
+    if (!shouldEmail) return;
+
+    let free: number | null = null;
+    try {
+      free = await deps.freeBytes(cfg.tempDir);
+    } catch {
+      free = null;
+    }
+    await notifier.failed({ month, phase, error: message, kind, freeBytes: free });
+  } catch (failErr) {
+    log(`Falha ao notificar erro do run ${runId}: ${errorMessage(failErr)}`);
   }
 }

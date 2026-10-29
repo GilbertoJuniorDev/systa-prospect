@@ -9,7 +9,7 @@ import { PrismaClient } from '@prisma/client';
 import { executeRun, extractZip, type RunDeps } from '../../src/ingest/run';
 import { connect, buildIndexes } from '../../src/ingest/db';
 import { loadCsv } from '../../src/ingest/loader';
-import { RECEITA_TABLES, SECONDARY_INDEXES } from '../../src/ingest/tables';
+import { RECEITA_TABLES, SECONDARY_INDEXES, TABLE_ORDER } from '../../src/ingest/tables';
 import { createRun, registerFiles } from '../../src/ingest/state';
 import { HttpError } from '../../src/ingest/errors';
 import type { IngestConfig } from '../../src/ingest/config';
@@ -23,11 +23,23 @@ const ZIP_SIZE = 100;
 
 // ─── Fixtures ────────────────────────────────────────────────────────────────
 
+const ESTAB_LINE = [
+  '11111111', '0001', '91', '1', 'FANTASIA', '02', '20200101', '00', '', '', '20200101', '0111301',
+  '', 'RUA', 'A', '1', '', 'CENTRO', '01001000', 'SP', '7107', '11', '12345678', '', '', '', '',
+  'a@b.com', '', '',
+].map((v) => `"${v}"`).join(';');
+
 const FIXTURES: Record<string, { csv: string; lines: string[] }> = {
   'Cnaes.zip': {
     csv: 'F.K03200$Z.D30513.CNAECSV',
-    lines: ['"0111301";"Cultivo de arroz"', '"0111302";"Cultivo de milho"'],
+    // Código repetido: 3 linhas lidas, 2 inseridas, 1 descartada.
+    lines: ['"0111301";"Cultivo de arroz"', '"0111302";"Cultivo de milho"', '"0111301";"Arroz dup"'],
   },
+  'Motivos.zip': { csv: 'F.K03200$Z.D30513.MOTICSV', lines: ['"00";"Sem motivo"'] },
+  'Municipios.zip': { csv: 'F.K03200$Z.D30513.MUNICCSV', lines: ['"7107";"SAO PAULO"'] },
+  'Naturezas.zip': { csv: 'F.K03200$Z.D30513.NATJUCSV', lines: ['"2062";"Sociedade Limitada"'] },
+  'Paises.zip': { csv: 'F.K03200$Z.D30513.PAISCSV', lines: ['"105";"BRASIL"'] },
+  'Qualificacoes.zip': { csv: 'F.K03200$Z.D30513.QUALSCSV', lines: ['"49";"Sócio-Administrador"'] },
   'Empresas0.zip': {
     csv: 'K3241.K03200Y0.D30513.EMPRECSV',
     lines: [
@@ -35,6 +47,11 @@ const FIXTURES: Record<string, { csv: string; lines: string[] }> = {
       '"22222222";"EMPRESA DOIS";"2062";"49";"0,00";"03";""',
     ],
   },
+  'Simples.zip': {
+    csv: 'F.K03200$W.SIMPLES.CSV.D30513',
+    lines: ['"11111111";"S";"20200101";"";"N";"";""'],
+  },
+  'Estabelecimentos0.zip': { csv: 'K3241.K03200Y0.D30513.ESTABELE', lines: [ESTAB_LINE] },
   'Socios0.zip': {
     csv: 'K3241.K03200Y0.D30513.SOCIOCSV',
     lines: [
@@ -49,7 +66,9 @@ function entry(name: string, size = ZIP_SIZE): DavEntry {
   return { name, href: `/public.php/webdav/${MONTH}/${name}`, size, isDir: false };
 }
 
-const DEFAULT_LISTING = [entry('Socios0.zip'), entry('Empresas0.zip'), entry('Cnaes.zip')];
+// Fora de ordem de propósito: a carga segue TABLE_ORDER, não a listagem.
+const DEFAULT_LISTING = Object.keys(FIXTURES).reverse().map((n) => entry(n));
+const ALL_ZIPS = Object.keys(FIXTURES);
 
 function writeWin1252(file: string, lines: string[]): void {
   fs.writeFileSync(file, iconv.encode(lines.join('\n') + '\n', 'win1252'));
@@ -243,7 +262,7 @@ describe.skipIf(!url)('executeRun (integração)', () => {
     const run = await getRun(runId);
     expect(run.status).toBe('SUCCESS');
     expect(run.prepared).toBe(true);
-    expect(loadedTables).toEqual(['Cnae', 'Empresa', 'Socio']);
+    expect(loadedTables).toEqual(TABLE_ORDER);
     expect(await count('Empresa')).toBe(2);
     const pre = await db.query(`SELECT 1 FROM "Empresa" WHERE cnpj_base = '99999999'`);
     expect(pre.rowCount).toBe(0);
@@ -253,14 +272,19 @@ describe.skipIf(!url)('executeRun (integração)', () => {
     const files = await prisma.ingestFile.findMany({ where: { runId } });
     expect(files.every((f) => f.status === 'INGESTED')).toBe(true);
     expect(files.find((f) => f.fileName === 'Socios0.zip')?.rows).toBe(3);
+    const cnaeFile = files.find((f) => f.fileName === 'Cnaes.zip');
+    expect(cnaeFile?.rows).toBe(3);
+    expect(cnaeFile?.discarded).toBe(1);
 
     expect(notes.started).toEqual([MONTH]);
     expect(notes.succeeded).toHaveLength(1);
     expect(notes.succeeded[0]).toMatchObject({
       month: MONTH,
       recovered: false,
-      rowsByTable: { Cnae: 2, Empresa: 2, Socio: 3 },
+      rowsByTable: { Cnae: 2, Empresa: 2, Socio: 3, Estabelecimento: 1, Simples: 1 },
     });
+    expect(Object.keys(notes.succeeded[0].rowsByTable)).toEqual(TABLE_ORDER);
+    expect(run.phase).toBe('Socio: índices');
     expect(notes.failed).toHaveLength(0);
 
     expect(fs.existsSync(tempDir)).toBe(true);
@@ -300,7 +324,7 @@ describe.skipIf(!url)('executeRun (integração)', () => {
     const run = await getRun(runId);
     expect(run.status).toBe('SUCCESS');
     expect(downloads).not.toContain('Empresas0.zip');
-    expect(downloads.sort()).toEqual(['Cnaes.zip', 'Socios0.zip']);
+    expect(downloads.sort()).toEqual(ALL_ZIPS.filter((z) => z !== 'Empresas0.zip').sort());
     expect(await count('Empresa')).toBe(1);
     expect(await count('Socio')).toBe(3);
     expect(notes.started).toEqual([]);
@@ -374,19 +398,52 @@ describe.skipIf(!url)('executeRun (integração)', () => {
     expect(notes.failed[0]).toMatchObject({ kind: 'PERMANENT', freeBytes: 1 });
   });
 
-  it('skips disk check when the zip is already complete on disk', async () => {
+  it('zip already complete on disk only needs space for extraction', async () => {
+    // size 100, fator 6, mínimo 0: download exige 600, extração exige 500.
+    async function attempt(free: number) {
+      await cleanTables();
+      const runId = await createRun(prisma, MONTH);
+      await prisma.ingestRun.update({ where: { id: runId }, data: { prepared: true } });
+      for (const z of ALL_ZIPS) fs.writeFileSync(path.join(tempDir, z), Buffer.alloc(ZIP_SIZE));
+      await executeRun(runId, makeDeps({ freeBytes: async () => free }));
+      return getRun(runId);
+    }
+
+    expect((await attempt(550)).status).toBe('SUCCESS');
+    expect(await count('Cnae')).toBe(2);
+
+    const failed = await attempt(450);
+    expect(failed.status).toBe('FAILED');
+    expect(failed.error).toBe('espaço insuficiente: 0.0 GB livres, 0.0 GB necessários para Cnaes.zip');
+  });
+
+  it('download needs full space when the zip is only partial', async () => {
     const runId = await createRun(prisma, MONTH);
     await prisma.ingestRun.update({ where: { id: runId }, data: { prepared: true } });
-    fs.writeFileSync(path.join(tempDir, 'Cnaes.zip'), Buffer.alloc(ZIP_SIZE));
-    const freeBytes = async () => 1;
+    fs.writeFileSync(path.join(tempDir, 'Cnaes.zip'), Buffer.alloc(10));
 
-    await executeRun(
-      runId,
-      makeDeps({ freeBytes, listMonthFiles: async () => [entry('Cnaes.zip')] }),
-    );
+    await executeRun(runId, makeDeps({ freeBytes: async () => 550 }));
 
+    expect((await getRun(runId)).status).toBe('FAILED');
+    expect(downloads).toEqual([]);
+  });
+
+  it('extract failure deletes the zip so the next attempt re-downloads', async () => {
+    const runId = await createRun(prisma, MONTH);
+    let broken = true;
+    const extract = async (zip: string, destDir: string) => {
+      if (broken && path.basename(zip) === 'Cnaes.zip') throw new Error('invalid signature');
+      return fakeExtract(zip, destDir);
+    };
+
+    await executeRun(runId, makeDeps({ extractZip: extract }));
+    expect((await getRun(runId)).status).toBe('FAILED');
+    expect(fs.existsSync(path.join(tempDir, 'Cnaes.zip'))).toBe(false);
+
+    broken = false;
+    await executeRun(runId, makeDeps({ extractZip: extract }));
     expect((await getRun(runId)).status).toBe('SUCCESS');
-    expect(await count('Cnae')).toBe(2);
+    expect(downloads.filter((d) => d === 'Cnaes.zip')).toHaveLength(2);
   });
 
   it('temporary error emails once in 6h', async () => {
@@ -428,17 +485,102 @@ describe.skipIf(!url)('executeRun (integração)', () => {
     expect(run.error).toBe(`arquivo inesperado ${FIXTURES['Socios0.zip'].csv} em Empresas0.zip`);
     expect(await count('Socio')).toBe(0);
     expect(await count('Empresa')).toBe(0);
-    expect(loadedTables).toEqual(['Cnae']);
+    expect(loadedTables).toEqual(TABLE_ORDER.slice(0, TABLE_ORDER.indexOf('Empresa')));
   });
 
-  it('fails when the month has no Receita zip', async () => {
+  it('listing failure on a fresh run abandons without touching data', async () => {
+    await insertEmpresa('99999999');
     const runId = await createRun(prisma, MONTH);
+    const listMonthFiles = async () => {
+      throw new HttpError(503, 'PROPFIND retornou HTTP 503');
+    };
 
-    await executeRun(runId, makeDeps({ listMonthFiles: async () => [entry('LAYOUT.pdf')] }));
+    await executeRun(runId, makeDeps({ listMonthFiles }));
+
+    const run = await getRun(runId);
+    expect(run.status).toBe('ABANDONED');
+    expect(run.prepared).toBe(false);
+    expect(await count('Empresa')).toBe(1);
+    expect(downloads).toEqual([]);
+    expect(notes.started).toEqual([]);
+    expect(notes.failed).toEqual([]);
+    expect(logs.some((l) => l.includes('PROPFIND retornou HTTP 503'))).toBe(true);
+  });
+
+  it('missing group on a fresh run abandons without touching data', async () => {
+    await insertEmpresa('99999999');
+    const runId = await createRun(prisma, MONTH);
+    const listing = DEFAULT_LISTING.filter(
+      (e) => e.name !== 'Socios0.zip' && e.name !== 'Estabelecimentos0.zip',
+    );
+
+    await executeRun(runId, makeDeps({ listMonthFiles: async () => [...listing, entry('LAYOUT.pdf')] }));
+
+    const run = await getRun(runId);
+    expect(run.status).toBe('ABANDONED');
+    expect(await count('Empresa')).toBe(1);
+    expect(downloads).toEqual([]);
+    expect(notes.started).toEqual([]);
+    expect(notes.failed).toEqual([]);
+    expect(logs.some((l) => l.includes('mês incompleto no servidor: faltam Estabelecimento, Socio'))).toBe(true);
+    expect(await prisma.ingestFile.count({ where: { runId } })).toBe(0);
+  });
+
+  it('zip without known size does not count for completeness', async () => {
+    const runId = await createRun(prisma, MONTH);
+    const listing = DEFAULT_LISTING.map((e) => (e.name === 'Paises.zip' ? { ...e, size: null } : e));
+
+    await executeRun(runId, makeDeps({ listMonthFiles: async () => listing }));
+
+    expect((await getRun(runId)).status).toBe('ABANDONED');
+    expect(logs.some((l) => l.includes('faltam Pais'))).toBe(true);
+  });
+
+  it('missing group on a prepared run fails', async () => {
+    const runId = await createRun(prisma, MONTH);
+    await prisma.ingestRun.update({ where: { id: runId }, data: { prepared: true } });
+    const listing = DEFAULT_LISTING.filter((e) => e.name !== 'Socios0.zip');
+
+    await executeRun(runId, makeDeps({ listMonthFiles: async () => listing }));
 
     const run = await getRun(runId);
     expect(run.status).toBe('FAILED');
     expect(run.errorKind).toBe('PERMANENT');
+    expect(run.error).toBe('mês incompleto no servidor: faltam Socio');
+    expect(notes.failed).toHaveLength(1);
+    expect(downloads).toEqual([]);
+  });
+
+  it('notifies failure even when markFailed cannot write (DB down)', async () => {
+    const runId = await createRun(prisma, MONTH);
+    const bind = (target: any, prop: PropertyKey) => {
+      const v = target[prop];
+      return typeof v === 'function' ? v.bind(target) : v;
+    };
+    const ingestRun = new Proxy(prisma.ingestRun, {
+      get(target, prop) {
+        if (prop !== 'update') return bind(target, prop);
+        return async (args: any) => {
+          if (args?.data?.status === 'FAILED') throw new Error('banco fora do ar');
+          return (target as any).update(args);
+        };
+      },
+    });
+    const brokenPrisma = new Proxy(prisma, {
+      get(target, prop) {
+        return prop === 'ingestRun' ? ingestRun : bind(target, prop);
+      },
+    }) as PrismaClient;
+    const failing = async () => {
+      throw new HttpError(503, 'HTTP 503 ao baixar');
+    };
+
+    await executeRun(runId, makeDeps({ prisma: brokenPrisma, downloadFile: failing }));
+
+    expect(notes.failed).toHaveLength(1);
+    expect(notes.failed[0]).toMatchObject({ month: MONTH, kind: 'TEMPORARY', error: 'HTTP 503 ao baixar' });
+    expect(logs.some((l) => l.includes('banco fora do ar'))).toBe(true);
+    expect((await getRun(runId)).status).toBe('RUNNING');
   });
 
   it('never rejects, even when the failure path fails', async () => {
