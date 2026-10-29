@@ -45,19 +45,31 @@ function safeDecodeURIComponent(text: string): string {
   }
 }
 
+/** Caminho decodificado, sem esquema/host e sem barras finais, para comparar hrefs. */
+function normalizeHrefPath(href: string): string {
+  let p = href;
+  const abs = /^[a-z][a-z0-9+.-]*:\/\/[^/]*/i.exec(p);
+  if (abs) p = p.slice(abs[0].length);
+  return safeDecodeURIComponent(p).replace(/\/+$/, '');
+}
+
 /**
- * Interpreta um multistatus de PROPFIND (Depth: 1). A primeira entrada é a
- * própria pasta consultada e é ignorada.
+ * Interpreta um multistatus de PROPFIND (Depth: 1). A entrada da própria pasta
+ * consultada é ignorada: com `selfHref` (caminho da requisição), pela comparação
+ * de href, em qualquer posição; sem ele, assume-se que é a primeira.
  */
-export function parsePropfind(xml: string): DavEntry[] {
+export function parsePropfind(xml: string, selfHref?: string): DavEntry[] {
   const blocks = xml.match(/<[Dd]:response>[\s\S]*?<\/[Dd]:response>/g) ?? [];
   const entries: DavEntry[] = [];
+  const self = selfHref === undefined ? null : normalizeHrefPath(selfHref);
 
-  for (const block of blocks.slice(1)) {
+  for (const block of self === null ? blocks.slice(1) : blocks) {
     const hrefMatch = block.match(/<[Dd]:href>([^<]+)<\/[Dd]:href>/);
     if (!hrefMatch) continue;
 
-    const href = safeDecodeURIComponent(decodeXmlEntities(hrefMatch[1].trim()));
+    const rawHref = decodeXmlEntities(hrefMatch[1].trim());
+    if (self !== null && normalizeHrefPath(rawHref) === self) continue;
+    const href = safeDecodeURIComponent(rawHref);
     const nameMatch = block.match(/<[Dd]:displayname>([^<]*)<\/[Dd]:displayname>/);
     const sizeMatch = block.match(/<[Dd]:getcontentlength>(\d+)<\/[Dd]:getcontentlength>/);
     const typeMatch = block.match(/<[Dd]:resourcetype>([\s\S]*?)<\/[Dd]:resourcetype>/);
@@ -102,7 +114,7 @@ function propfind(cfg: IngestConfig, urlStr: string): Promise<DavEntry[]> {
             reject(new HttpError(res.statusCode ?? 0, `PROPFIND retornou HTTP ${res.statusCode ?? 0}`));
             return;
           }
-          resolve(parsePropfind(data));
+          resolve(parsePropfind(data, url.pathname));
         });
       },
     );

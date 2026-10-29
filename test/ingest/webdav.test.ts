@@ -34,6 +34,23 @@ describe('parsePropfind', () => {
     expect(entries.find((e) => e.name === 'Socios3.zip')?.size).toBe(456789);
   });
 
+  it('com selfHref, remove a própria pasta pelo href mesmo fora de ordem', () => {
+    const blocks = month.match(/<d:response>[\s\S]*?<\/d:response>/g)!;
+    // Própria pasta por último.
+    const reordered = `<d:multistatus xmlns:d="DAV:">${[...blocks.slice(1), blocks[0]].join('')}</d:multistatus>`;
+    expect(blocks).toHaveLength(4);
+    const entries = parsePropfind(reordered, '/public.php/webdav/2026-10/');
+    expect(entries.map((e) => e.name)).toEqual(['Empresas0.zip', 'Socios3.zip', 'LAYOUT.pdf']);
+  });
+
+  it('com selfHref, compara href codificado/absoluto e sem barra final', () => {
+    const xml = `<d:multistatus xmlns:d="DAV:">
+      <d:response><d:href>/public.php/webdav/2026-10/A.zip</d:href><d:propstat><d:prop><d:getcontentlength>1</d:getcontentlength><d:resourcetype/></d:prop></d:propstat></d:response>
+      <d:response><d:href>https://arquivos.receitafederal.gov.br/public.php/webdav/2026%2D10</d:href><d:propstat><d:prop><d:resourcetype><d:collection/></d:resourcetype></d:prop></d:propstat></d:response>
+    </d:multistatus>`;
+    expect(parsePropfind(xml, '/public.php/webdav/2026-10/').map((e) => e.name)).toEqual(['A.zip']);
+  });
+
   it('retorna lista vazia para XML sem respostas', () => {
     expect(parsePropfind('<d:multistatus xmlns:d="DAV:"></d:multistatus>')).toEqual([]);
   });
