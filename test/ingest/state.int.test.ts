@@ -188,4 +188,19 @@ describe.skipIf(!url)('ingest state (integração)', () => {
     await createRun(prisma, '2026-10');
     expect((await latestRunStatus(prisma)).maintenance).toBe(true);
   });
+
+  it('bootstrap SUCCESS has phase bootstrap and no loadedAt (caches are not flagged stale)', async () => {
+    await prisma.empresa.create({ data: empresa });
+    await bootstrapIfNeeded(prisma, { ...baseCfg, bootstrapMonth: '2026-06' }, silent);
+    const run = await prisma.ingestRun.findFirstOrThrow();
+    expect(run.phase).toBe('bootstrap');
+    expect(await latestRunStatus(prisma)).toEqual({ month: '2026-06', loadedAt: null, maintenance: false });
+
+    // Primeira carga real depois do bootstrap: loadedAt volta a valer.
+    const ok = await createRun(prisma, '2026-07');
+    await markSuccess(prisma, ok);
+    const s = await latestRunStatus(prisma);
+    expect(s.month).toBe('2026-07');
+    expect(s.loadedAt).toBeInstanceOf(Date);
+  });
 });

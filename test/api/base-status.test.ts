@@ -47,6 +47,12 @@ describe('cacheNotice', () => {
   it('does not flag fresh cache', () => {
     expect(cacheNotice(new Date('2026-10-30T00:00:00Z'), base)).toEqual({ baseDesatualizada: false, aviso: null });
   });
+  it('does not flag after bootstrap (month known, loadedAt null)', () => {
+    expect(cacheNotice(new Date('2020-01-01T00:00:00Z'), { month: '2026-06', loadedAt: null, maintenance: false })).toEqual({
+      baseDesatualizada: false,
+      aviso: null,
+    });
+  });
   it('does not flag when no base loaded', () => {
     expect(cacheNotice(new Date(), { month: null, loadedAt: null, maintenance: false })).toEqual({
       baseDesatualizada: false,

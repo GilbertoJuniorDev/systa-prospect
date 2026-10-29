@@ -9,6 +9,9 @@ import type { DavEntry } from './webdav';
 
 const EMAIL_THROTTLE_MS = 6 * 60 * 60 * 1000;
 
+/** `phase` do SUCCESS sintético do primeiro deploy (base carregada antes do agendador). */
+export const BOOTSTRAP_PHASE = 'bootstrap';
+
 /** Usado em `pg.Client` dentro da transação da carga. Parâmetros: runId, fileName, rows, discarded. */
 export const MARK_INGESTED_SQL =
   `UPDATE "IngestFile" SET status='INGESTED', rows=$3, discarded=$4, "ingestedAt"=now() WHERE "runId"=$1 AND "fileName"=$2`;
@@ -17,13 +20,13 @@ export const MARK_INGESTED_SQL =
 
 export async function getLastSuccess(
   prisma: PrismaClient,
-): Promise<{ month: string; finishedAt: Date } | null> {
+): Promise<{ month: string; finishedAt: Date; phase: string | null } | null> {
   const run = await prisma.ingestRun.findFirst({
     where: { status: 'SUCCESS', finishedAt: { not: null } },
     orderBy: { finishedAt: 'desc' },
   });
   if (!run || !run.finishedAt) return null;
-  return { month: run.month, finishedAt: run.finishedAt };
+  return { month: run.month, finishedAt: run.finishedAt, phase: run.phase };
 }
 
 /**
@@ -79,7 +82,8 @@ export async function latestRunStatus(
   const [last, open] = await Promise.all([getLastSuccess(prisma), getOpenRun(prisma)]);
   return {
     month: last?.month ?? null,
-    loadedAt: last?.finishedAt ?? null,
+    // Bootstrap não é uma carga: a data dele (o deploy) não pode marcar caches como defasados.
+    loadedAt: last && last.phase !== BOOTSTRAP_PHASE ? last.finishedAt : null,
     maintenance: open !== null,
   };
 }
@@ -213,6 +217,7 @@ export async function bootstrapIfNeeded(
       month: cfg.bootstrapMonth,
       status: 'SUCCESS',
       prepared: true,
+      phase: BOOTSTRAP_PHASE,
       finishedAt: new Date(),
     },
   });
