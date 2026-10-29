@@ -465,6 +465,13 @@ export async function consultaRoutes(app: FastifyInstance) {
           where: { userId_paramsHash: { userId: request.user.userId, paramsHash } },
           data: { total, totalAt: now },
         });
+      } else {
+        // Reexportação grátis na base nova: o número salvo foi reconferido agora
+        // (deixa de ser defasado), sem mexer no total nem na validade.
+        await prisma.consultaCache.update({
+          where: { userId_paramsHash: { userId: request.user.userId, paramsHash } },
+          data: { totalAt: now },
+        });
       }
 
       if (base.month) reply.header('X-Base-Mes', base.month);
