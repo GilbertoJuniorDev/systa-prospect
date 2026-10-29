@@ -81,7 +81,9 @@ temp/
 └── ...
 ```
 
-### Script de orquestração (`src/ingest.ts`)
+### Script de orquestração (referência histórica)
+
+> **Atenção:** o pipeline manual (`src/ingest.ts` / `npm run download`) foi substituído pelo agendador em `src/ingest/` — `npm run ingest:scheduler` (serviço `ingest` no docker-compose, verifica a Receita diariamente) e `npm run ingest:now [-- AAAA-MM]` (execução imediata). O exemplo abaixo só ilustra o processamento sequencial.
 
 ```typescript
 import fs from 'fs';
