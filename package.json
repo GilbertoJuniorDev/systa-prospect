@@ -10,6 +10,7 @@
     "download": "ts-node src/download.ts",
     "ingest": "node dist/ingest.js",
     "start": "node dist/api.js",
+    "test": "vitest run",
     "prisma:generate": "prisma generate",
     "prisma:migrate": "prisma migrate deploy",
     "prisma:push": "prisma db push",
@@ -43,6 +44,7 @@
     "@types/unzipper": "^0.10.10",
     "prisma": "^5.14.0",
     "ts-node": "^10.9.2",
-    "typescript": "^5.4.5"
+    "typescript": "^5.4.5",
+    "vitest": "^2.1.9"
   }
 }
