@@ -11,7 +11,7 @@ import { consultaRoutes } from './routes/consulta';
 import { creditsRoutes } from './routes/credits';
 import { SITUACAO_MAP, formatFone, formatCNPJ, formatCEP } from './lib/formatters';
 import { authenticate } from './lib/authenticate';
-import { getBaseStatus, isReceitaRoute, MAINTENANCE_BODY } from './lib/base-status';
+import { getBaseStatus, maintenanceHook } from './lib/base-status';
 
 const REQUIRED_ENV_VARS = ['DATABASE_URL', 'JWT_SECRET', 'STRIPE_SECRET_KEY', 'STRIPE_WEBHOOK_SECRET', 'INTERNAL_API_KEY'] as const;
 for (const key of REQUIRED_ENV_VARS) {
@@ -34,12 +34,7 @@ app.addHook('onRequest', async (request, reply) => {
 });
 
 // Durante a atualização da base da Receita, rotas que consultam essas tabelas respondem 503.
-app.addHook('onRequest', async (request, reply) => {
-  if (!isReceitaRoute(request.url)) return;
-  if ((await getBaseStatus()).maintenance) {
-    return reply.code(503).header('Retry-After', '1800').send(MAINTENANCE_BODY);
-  }
-});
+app.addHook('onRequest', maintenanceHook);
 
 const PORT = (() => {
   const p = parseInt(process.env.PORT ?? '3333', 10);

@@ -1,3 +1,4 @@
+import type { FastifyReply, FastifyRequest } from 'fastify';
 import { prisma } from './prisma';
 import { latestRunStatus } from '../ingest/state';
 
@@ -48,7 +49,9 @@ export async function getBaseStatus(): Promise<BaseStatus> {
 
 // ─── Rotas que dependem dos dados da Receita ─────────────────────────────────
 
-export function isReceitaRoute(url: string): boolean {
+/** Aceita a URL ou o padrão da rota (ex.: '/cnpj/:cnpj'); `undefined` (sem rota → 404) é false. */
+export function isReceitaRoute(url: string | undefined): boolean {
+  if (url === undefined) return false;
   const path = url.split('?')[0].split('#')[0];
   return (
     path === '/empresas' ||
@@ -59,6 +62,18 @@ export function isReceitaRoute(url: string): boolean {
     path.startsWith('/cnaes/') ||
     path === '/municipios'
   );
+}
+
+/**
+ * Hook onRequest: durante a atualização da base, rotas que consultam as tabelas da
+ * Receita respondem 503. Usa o padrão da rota (não a URL crua), então URL sem rota
+ * registrada segue para o 404 normal.
+ */
+export async function maintenanceHook(request: FastifyRequest, reply: FastifyReply): Promise<void> {
+  if (!isReceitaRoute(request.routeOptions.url)) return;
+  if ((await getBaseStatus()).maintenance) {
+    await reply.code(503).header('Retry-After', '1800').send(MAINTENANCE_BODY);
+  }
 }
 
 // ─── Datas e aviso de cache defasado ─────────────────────────────────────────

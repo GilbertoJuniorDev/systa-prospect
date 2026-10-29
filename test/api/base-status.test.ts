@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import Fastify from 'fastify';
 
 vi.mock('../../src/lib/prisma', () => ({ prisma: {} }));
 const latestRunStatus = vi.fn();
@@ -11,6 +12,7 @@ import {
   cacheNotice,
   formatBaseDate,
   MAINTENANCE_BODY,
+  maintenanceHook,
 } from '../../src/lib/base-status';
 
 describe('isReceitaRoute', () => {
@@ -107,5 +109,51 @@ describe('getBaseStatus', () => {
   it('falls back to empty status when no known value', async () => {
     latestRunStatus.mockRejectedValueOnce(new Error('db down'));
     expect(await getBaseStatus()).toEqual({ month: null, loadedAt: null, maintenance: false });
+  });
+});
+
+describe('isReceitaRoute with route patterns', () => {
+  it('accepts Fastify route patterns', () => {
+    expect(isReceitaRoute('/empresas/:cnpj_base')).toBe(true);
+    expect(isReceitaRoute('/empresas/cnae/:codigo')).toBe(true);
+    expect(isReceitaRoute('/cnpj/:cnpj')).toBe(true);
+    expect(isReceitaRoute('/consulta/exportar')).toBe(true);
+    expect(isReceitaRoute('/consultas/minhas')).toBe(false);
+  });
+  it('unmatched route (404) → false', () => {
+    expect(isReceitaRoute(undefined)).toBe(false);
+  });
+});
+
+describe('maintenanceHook', () => {
+  beforeEach(() => {
+    resetBaseStatusCache();
+    latestRunStatus.mockReset().mockResolvedValue({ month: '2026-10', loadedAt: null, maintenance: true });
+  });
+
+  async function makeApp() {
+    const app = Fastify();
+    app.addHook('onRequest', maintenanceHook);
+    app.get('/cnpj/:cnpj', async () => ({ ok: true }));
+    app.get('/base/status', async () => ({ ok: true }));
+    await app.ready();
+    return app;
+  }
+
+  it('uses the route pattern: /cnpj/:cnpj blocked with 503 during maintenance', async () => {
+    const app = await makeApp();
+    const res = await app.inject({ method: 'GET', url: '/cnpj/12345678000199?x=1' });
+    expect(res.statusCode).toBe(503);
+    expect(res.headers['retry-after']).toBe('1800');
+    expect(res.json()).toEqual(MAINTENANCE_BODY);
+    await app.close();
+  });
+
+  it('does not block non-Receita routes nor unknown URLs (404)', async () => {
+    const app = await makeApp();
+    expect((await app.inject({ method: 'GET', url: '/base/status' })).statusCode).toBe(200);
+    // URL "parecida" com rota da Receita, mas sem rota registrada: 404, não 503.
+    expect((await app.inject({ method: 'GET', url: '/empresas/qualquer' })).statusCode).toBe(404);
+    await app.close();
   });
 });
