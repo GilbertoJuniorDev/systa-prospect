@@ -2,7 +2,7 @@ import http from 'http';
 import https from 'https';
 import fs from 'fs';
 import { pipeline } from 'stream/promises';
-import { classifyError, HttpError, TemporaryError } from './errors';
+import { classifyError, HttpError, PermanentError, TemporaryError } from './errors';
 
 // ─── Tipos e constantes ──────────────────────────────────────────────────────
 
@@ -32,6 +32,21 @@ function backoffMs(attempt: number): number {
 }
 
 // ─── Requisição ──────────────────────────────────────────────────────────────
+
+/** Headers para seguir um redirect: Authorization só segue se protocolo e host não mudarem. */
+export function redirectHeaders(
+  from: URL,
+  to: URL,
+  headers: Record<string, string>,
+): Record<string, string> {
+  const next = { ...headers };
+  if (to.protocol !== from.protocol || to.host !== from.host) {
+    for (const key of Object.keys(next)) {
+      if (key.toLowerCase() === 'authorization') delete next[key];
+    }
+  }
+  return next;
+}
 
 interface Opened {
   req: http.ClientRequest;
@@ -70,13 +85,14 @@ function openResponse(
             reject(new Error('Muitos redirecionamentos'));
             return;
           }
-          const next = new URL(loc, parsed);
-          const nextHeaders = { ...headers };
-          if (next.host !== parsed.host) {
-            for (const key of Object.keys(nextHeaders)) {
-              if (key.toLowerCase() === 'authorization') delete nextHeaders[key];
-            }
+          let next: URL;
+          try {
+            next = new URL(loc, parsed);
+          } catch {
+            reject(new PermanentError(`Location inválido no redirecionamento HTTP ${status}: ${loc}`));
+            return;
           }
+          const nextHeaders = redirectHeaders(parsed, next, headers);
           openResponse(next.toString(), nextHeaders, idleTimeoutMs, redirects + 1).then(resolve, reject);
           return;
         }

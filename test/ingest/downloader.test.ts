@@ -4,13 +4,13 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import { AddressInfo } from 'net';
-import { downloadFile } from '../../src/ingest/downloader';
-import { HttpError } from '../../src/ingest/errors';
+import { downloadFile, redirectHeaders } from '../../src/ingest/downloader';
+import { HttpError, PermanentError } from '../../src/ingest/errors';
 
 const BUFFER = Buffer.alloc(1000);
 for (let i = 0; i < BUFFER.length; i++) BUFFER[i] = i % 251;
 
-type Mode = 'range' | 'ignore-range' | 'drop-first' | '503' | '404' | '416' | 'hang' | 'redirect';
+type Mode = 'range' | 'ignore-range' | 'drop-first' | '503' | '404' | '416' | 'hang' | 'redirect' | 'bad-location';
 
 let server: http.Server;
 let baseUrl: string;
@@ -78,6 +78,9 @@ beforeEach(async () => {
         return; // never ends
       case 'redirect':
         res.writeHead(302, { Location: '/target' });
+        return res.end();
+      case 'bad-location':
+        res.writeHead(302, { Location: 'http://[bad' });
         return res.end();
     }
   });
@@ -182,5 +185,38 @@ describe('downloadFile', () => {
       code: 'ETIMEDOUT',
     });
     expect(requests).toHaveLength(2);
+  });
+
+  it('invalid Location header rejects with PermanentError (no retry)', async () => {
+    mode = 'bad-location';
+    const err = await downloadFile(base()).catch((e) => e);
+    expect(err).toBeInstanceOf(PermanentError);
+    expect(err.message).toContain('Location inválido');
+    expect(requests).toHaveLength(1);
+    expect(sleeps).toEqual([]);
+  });
+});
+
+describe('redirectHeaders', () => {
+  const headers = { Authorization: 'Basic x', Range: 'bytes=10-' };
+
+  it('keeps Authorization on same protocol and host', () => {
+    expect(redirectHeaders(new URL('https://a.gov.br/x'), new URL('https://a.gov.br/y'), headers)).toEqual(headers);
+  });
+
+  it('strips Authorization when the host changes', () => {
+    expect(redirectHeaders(new URL('https://a.gov.br/x'), new URL('https://cdn.example/y'), headers)).toEqual({
+      Range: 'bytes=10-',
+    });
+  });
+
+  it('strips Authorization when only the protocol changes (https → http)', () => {
+    expect(redirectHeaders(new URL('https://a.gov.br/x'), new URL('http://a.gov.br/y'), headers)).toEqual({
+      Range: 'bytes=10-',
+    });
+  });
+
+  it('strips authorization regardless of header case', () => {
+    expect(redirectHeaders(new URL('https://a/x'), new URL('http://a/x'), { authorization: 'b' })).toEqual({});
   });
 });
