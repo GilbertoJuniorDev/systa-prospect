@@ -1,0 +1,46 @@
+<?xml version="1.0"?>
+<d:multistatus xmlns:d="DAV:" xmlns:s="http://sabredav.org/ns" xmlns:oc="http://owncloud.org/ns" xmlns:nc="http://nextcloud.org/ns">
+  <d:response>
+    <d:href>/public.php/webdav/2026-10/</d:href>
+    <d:propstat>
+      <d:prop>
+        <d:displayname>2026-10</d:displayname>
+        <d:resourcetype><d:collection/></d:resourcetype>
+      </d:prop>
+      <d:status>HTTP/1.1 200 OK</d:status>
+    </d:propstat>
+  </d:response>
+  <d:response>
+    <d:href>/public.php/webdav/2026-10/Empresas0.zip</d:href>
+    <d:propstat>
+      <d:prop>
+        <d:displayname>Empresas0.zip</d:displayname>
+        <d:getcontentlength>123</d:getcontentlength>
+        <d:resourcetype/>
+      </d:prop>
+      <d:status>HTTP/1.1 200 OK</d:status>
+    </d:propstat>
+  </d:response>
+  <d:response>
+    <d:href>/public.php/webdav/2026-10/Socios3.zip</d:href>
+    <d:propstat>
+      <d:prop>
+        <d:displayname>Socios3.zip</d:displayname>
+        <d:getcontentlength>456789</d:getcontentlength>
+        <d:resourcetype/>
+      </d:prop>
+      <d:status>HTTP/1.1 200 OK</d:status>
+    </d:propstat>
+  </d:response>
+  <d:response>
+    <d:href>/public.php/webdav/2026-10/LAYOUT.pdf</d:href>
+    <d:propstat>
+      <d:prop>
+        <d:displayname>LAYOUT.pdf</d:displayname>
+        <d:getcontentlength>98765</d:getcontentlength>
+        <d:resourcetype/>
+      </d:prop>
+      <d:status>HTTP/1.1 200 OK</d:status>
+    </d:propstat>
+  </d:response>
+</d:multistatus>
