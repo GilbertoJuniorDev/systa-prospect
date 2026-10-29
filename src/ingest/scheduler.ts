@@ -4,7 +4,7 @@ import type { Client } from 'pg';
 import { createTransporter } from '../services/email.service';
 import { PermanentError } from './errors';
 import { loadIngestConfig, type IngestConfig } from './config';
-import { connect, tryAdvisoryLock } from './db';
+import { connect, ensureLogged, tryAdvisoryLock } from './db';
 import { decideNext, latestMonth, nextDailyRun, nextWakeUp, type Decision, type Trigger } from './decide';
 import { freeBytes } from './disk';
 import { downloadFile } from './downloader';
@@ -250,6 +250,12 @@ async function main(): Promise<void> {
   }
 
   log(`Agendador iniciado (hora ${cfg.cronHour}, fuso ${cfg.timeZone})`);
+  // Verificação única: tabelas da Receita deixadas UNLOGGED pelo pipeline antigo.
+  try {
+    await withFreshDb(cfg, prisma, (deps) => ensureLogged(deps.db, log));
+  } catch (err) {
+    log(`Falha ao verificar tabelas UNLOGGED: ${errorMessage(err)}`);
+  }
   await cycle('startup');
 }
 

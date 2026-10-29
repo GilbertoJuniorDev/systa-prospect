@@ -89,6 +89,28 @@ export async function buildIndexes(
   await client.query(`ANALYZE "${table}"`);
 }
 
+/**
+ * Verificação única no start do agendador: tabela da Receita deixada UNLOGGED
+ * (pipeline manual antigo) seria esvaziada num crash do Postgres. Volta para LOGGED.
+ */
+export async function ensureLogged(client: Client, log: (m: string) => void): Promise<string[]> {
+  const r = await client.query<{ relname: string }>(
+    `SELECT c.relname FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+     WHERE n.nspname = current_schema() AND c.relkind = 'r' AND c.relpersistence = 'u'
+       AND c.relname = ANY($1::text[])
+     ORDER BY c.relname`,
+    [RECEITA_TABLES],
+  );
+  const fixed: string[] = [];
+  for (const { relname } of r.rows) {
+    log(`Tabela ${relname} está UNLOGGED; convertendo para LOGGED...`);
+    await client.query(`ALTER TABLE "${relname}" SET LOGGED`);
+    log(`Tabela ${relname} convertida para LOGGED`);
+    fixed.push(relname);
+  }
+  return fixed;
+}
+
 export async function tryAdvisoryLock(client: Client): Promise<boolean> {
   const r = await client.query('SELECT pg_try_advisory_lock(727011) AS locked');
   return r.rows[0].locked === true;
