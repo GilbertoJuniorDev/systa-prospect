@@ -11,6 +11,7 @@ import { consultaRoutes } from './routes/consulta';
 import { creditsRoutes } from './routes/credits';
 import { SITUACAO_MAP, formatFone, formatCNPJ, formatCEP } from './lib/formatters';
 import { authenticate } from './lib/authenticate';
+import { getBaseStatus, isReceitaRoute, MAINTENANCE_BODY } from './lib/base-status';
 
 const REQUIRED_ENV_VARS = ['DATABASE_URL', 'JWT_SECRET', 'STRIPE_SECRET_KEY', 'STRIPE_WEBHOOK_SECRET', 'INTERNAL_API_KEY'] as const;
 for (const key of REQUIRED_ENV_VARS) {
@@ -28,7 +29,15 @@ app.addHook('onRequest', async (request, reply) => {
   if (request.url === '/health') return;
   const key = request.headers['x-internal-api-key'];
   if (key !== process.env.INTERNAL_API_KEY) {
-    reply.code(403).send({ error: 'Forbidden' });
+    return reply.code(403).send({ error: 'Forbidden' });
+  }
+});
+
+// Durante a atualização da base da Receita, rotas que consultam essas tabelas respondem 503.
+app.addHook('onRequest', async (request, reply) => {
+  if (!isReceitaRoute(request.url)) return;
+  if ((await getBaseStatus()).maintenance) {
+    return reply.code(503).header('Retry-After', '1800').send(MAINTENANCE_BODY);
   }
 });
 
@@ -468,7 +477,15 @@ app.get<{ Params: { cnpj: string } }>(
 
 app.get('/health', async () => {
   await prisma.$queryRaw`SELECT 1`;
-  return { status: 'ok' };
+  const { maintenance } = await getBaseStatus();
+  return { status: 'ok', maintenance };
+});
+
+// ─── GET /base/status ─────────────────────────────────────────────────────────
+
+app.get('/base/status', async () => {
+  const { month, loadedAt, maintenance } = await getBaseStatus();
+  return { month, loadedAt: loadedAt ? loadedAt.toISOString() : null, maintenance };
 });
 
 // ─── Handler global de erros ──────────────────────────────────────────────────

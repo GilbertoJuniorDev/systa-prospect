@@ -3,6 +3,7 @@ import Stripe from 'stripe';
 import { prisma } from '../lib/prisma';
 import { authenticate } from '../lib/authenticate';
 import { addCredits } from '../lib/credits';
+import { getBaseStatus, cacheNotice } from '../lib/base-status';
 
 const PACKAGES = {
   starter: { credits: 50,  price: 2900,  label: '50 créditos' },
@@ -105,16 +106,23 @@ export async function creditsRoutes(fastify: FastifyInstance): Promise<void> {
       const caches = hashes.length > 0
         ? await prisma.consultaCache.findMany({
             where: { userId, paramsHash: { in: hashes } },
-            select: { paramsHash: true, params: true, total: true, expiresAt: true },
+            select: { paramsHash: true, params: true, total: true, totalAt: true, createdAt: true, expiresAt: true },
           })
         : [];
 
       const cacheMap = new Map(caches.map((c) => [c.paramsHash, c]));
 
-      const transactions = user.creditTransactions.map(({ paramsHash, ...tx }) => ({
-        ...tx,
-        consultaCache: paramsHash ? (cacheMap.get(paramsHash) ?? null) : null,
-      }));
+      const base = await getBaseStatus();
+
+      const transactions = user.creditTransactions.map(({ paramsHash, ...tx }) => {
+        const cache = paramsHash ? cacheMap.get(paramsHash) : undefined;
+        if (!cache) return { ...tx, consultaCache: null };
+        const { totalAt, ...rest } = cache;
+        return {
+          ...tx,
+          consultaCache: { ...rest, ...cacheNotice(totalAt ?? cache.createdAt, base) },
+        };
+      });
 
       return {
         balance: user.credits,

@@ -6,6 +6,8 @@ import { prisma } from '../lib/prisma';
 import { SITUACAO_MAP, PORTE_MAP, formatCNPJ, formatCEP, formatFone, formatDate } from '../lib/formatters';
 import { authenticate } from '../lib/authenticate';
 import { deductCredits, addCredits } from '../lib/credits';
+import { getBaseStatus, cacheNotice, formatBaseDate } from '../lib/base-status';
+import { exportPricing } from '../lib/export-pricing';
 
 const MAX_EXPORT_ROWS = parseInt(process.env.MAX_EXPORT_ROWS ?? '200000', 10);
 
@@ -128,10 +130,16 @@ export async function consultaRoutes(app: FastifyInstance) {
       const { userId } = request.user;
       const consultas = await prisma.consultaCache.findMany({
         where: { userId },
-        select: { id: true, params: true, total: true, expiresAt: true, createdAt: true },
+        select: { id: true, params: true, total: true, totalAt: true, expiresAt: true, createdAt: true },
         orderBy: { createdAt: 'desc' },
       });
-      return { consultas };
+      const base = await getBaseStatus();
+      return {
+        consultas: consultas.map(({ totalAt, ...c }) => ({
+          ...c,
+          ...cacheNotice(totalAt ?? c.createdAt, base),
+        })),
+      };
     },
   );
 
@@ -216,7 +224,8 @@ export async function consultaRoutes(app: FastifyInstance) {
       });
     }
 
-    return { total };
+    const base = await getBaseStatus();
+    return { total, baseMes: base.month, baseAtualizadaEm: base.loadedAt };
     },
   );
 
@@ -257,7 +266,8 @@ export async function consultaRoutes(app: FastifyInstance) {
         });
       }
 
-      // Check cache: same user + same filters within 30 days = no credit charge
+      // Check cache: same user + same filters within 30 days = no full charge
+      // (se a base cresceu desde o total salvo, cobra só a diferença)
       const paramsHash = buildParamsHash(body);
       const now = new Date();
       const cached = await prisma.consultaCache.findUnique({
@@ -265,14 +275,25 @@ export async function consultaRoutes(app: FastifyInstance) {
       });
       const isCached = cached !== null && cached.expiresAt > now;
 
-      let exportCost = 0;
-      if (!isCached) {
-        exportCost = Math.max(1, Math.ceil(total / 10));
+      const base = await getBaseStatus();
+      const pricing = exportPricing(total, isCached ? cached : null);
+      const exportCost = pricing.cost;
+      if (pricing.kind === 'full') {
         const credited = await deductCredits(
           request.user.userId,
           exportCost,
           'EXPORT',
           `Exportação de ${total.toLocaleString('pt-BR')} registros`,
+          reply,
+          paramsHash,
+        );
+        if (!credited) return;
+      } else if (pricing.kind === 'diff') {
+        const credited = await deductCredits(
+          request.user.userId,
+          exportCost,
+          'EXPORT_DIFF',
+          `Diferença de exportação após atualização da base: +${(total - cached!.total).toLocaleString('pt-BR')} registros`,
           reply,
           paramsHash,
         );
@@ -410,10 +431,16 @@ export async function consultaRoutes(app: FastifyInstance) {
           to: { row: 1, column: sheet.columns.length },
         };
 
+        const info = workbook.addWorksheet('Info');
+        info.addRow(['Base Receita Federal', base.month ?? '']);
+        info.addRow(['Atualizada em', base.loadedAt ? formatBaseDate(base.loadedAt) : '']);
+        info.getColumn(1).width = 24;
+        info.getColumn(2).width = 20;
+
         buffer = await workbook.xlsx.writeBuffer();
       } catch (err) {
         // Refund credits if the export failed after deduction
-        if (!isCached && exportCost > 0) {
+        if (exportCost > 0) {
           await addCredits(
             request.user.userId,
             exportCost,
@@ -425,14 +452,22 @@ export async function consultaRoutes(app: FastifyInstance) {
       }
 
       // Save cache entry on first successful export with these filters
-      if (!isCached) {
+      if (pricing.kind === 'full') {
         const expiresAt = new Date(now.getTime() + CACHE_TTL_MS);
         await prisma.consultaCache.upsert({
           where: { userId_paramsHash: { userId: request.user.userId, paramsHash } },
-          create: { userId: request.user.userId, paramsHash, params: body as unknown as Prisma.InputJsonValue, total, expiresAt },
-          update: { total, expiresAt },
+          create: { userId: request.user.userId, paramsHash, params: body as unknown as Prisma.InputJsonValue, total, totalAt: now, expiresAt },
+          update: { total, totalAt: now, expiresAt },
+        });
+      } else if (pricing.kind === 'diff') {
+        // Cobrou só a diferença: atualiza o total salvo sem renovar a validade do cache
+        await prisma.consultaCache.update({
+          where: { userId_paramsHash: { userId: request.user.userId, paramsHash } },
+          data: { total, totalAt: now },
         });
       }
+
+      if (base.month) reply.header('X-Base-Mes', base.month);
 
       return reply
         .header('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
