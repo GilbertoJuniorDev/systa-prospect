@@ -145,14 +145,15 @@ model User {
 }
 
 model ConsultaCache {
-  id         String   @id @default(cuid())
+  id         String    @id @default(cuid())
   userId     String
-  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  user       User      @relation(fields: [userId], references: [id], onDelete: Cascade)
   paramsHash String
   params     Json
   total      Int
+  totalAt    DateTime?
   expiresAt  DateTime
-  createdAt  DateTime @default(now())
+  createdAt  DateTime  @default(now())
 
   @@unique([userId, paramsHash])
   @@map("ConsultaCache")
@@ -182,4 +183,56 @@ model PasswordResetToken {
   createdAt DateTime  @default(now())
 
   @@map("PasswordResetToken")
+}
+
+enum IngestStatus {
+  RUNNING
+  SUCCESS
+  FAILED
+  ABANDONED
+}
+
+enum IngestErrorKind {
+  TEMPORARY
+  PERMANENT
+}
+
+enum IngestFileStatus {
+  PENDING
+  INGESTED
+  SKIPPED
+}
+
+model IngestRun {
+  id                 String           @id @default(cuid())
+  month              String           @db.VarChar(7)
+  status             IngestStatus
+  prepared           Boolean          @default(false)
+  phase              String?
+  error              String?
+  errorKind          IngestErrorKind?
+  lastFailureEmailAt DateTime?
+  startedAt          DateTime         @default(now())
+  finishedAt         DateTime?
+  files              IngestFile[]
+
+  @@index([status])
+  @@index([startedAt])
+  @@map("IngestRun")
+}
+
+model IngestFile {
+  id         String           @id @default(cuid())
+  runId      String
+  run        IngestRun        @relation(fields: [runId], references: [id], onDelete: Cascade)
+  fileName   String
+  size       BigInt
+  tableName  String?
+  status     IngestFileStatus @default(PENDING)
+  rows       Int?
+  discarded  Int?
+  ingestedAt DateTime?
+
+  @@unique([runId, fileName])
+  @@map("IngestFile")
 }

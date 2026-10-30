@@ -67,6 +67,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+    restart: unless-stopped
     depends_on:
       postgres:
         condition: service_healthy
@@ -75,10 +76,22 @@ services:
       DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}?schema=public
       SHARE_TOKEN: ${SHARE_TOKEN}
       INGEST_MONTH: ${INGEST_MONTH}
+      SMTP_HOST: ${SMTP_HOST}
+      SMTP_PORT: ${SMTP_PORT:-587}
+      SMTP_SECURE: ${SMTP_SECURE}
+      SMTP_USER: ${SMTP_USER}
+      SMTP_PASS: ${SMTP_PASS}
+      SMTP_FROM: ${SMTP_FROM}
+      INGEST_NOTIFY_EMAIL: ${INGEST_NOTIFY_EMAIL}
+      INGEST_CRON_HOUR: ${INGEST_CRON_HOUR:-2}
+      INGEST_MIN_FREE_GB: ${INGEST_MIN_FREE_GB:-5}
+      INGEST_DISK_FACTOR: ${INGEST_DISK_FACTOR:-6}
+      INGEST_STABLE_WAIT_MS: ${INGEST_STABLE_WAIT_MS:-300000}
+      TZ: ${TZ:-America/Sao_Paulo}
     volumes:
       - ingest_temp:/app/temp
-    command: ['sh', '-c', 'node dist/download.js && node dist/ingest.js']
-    profiles: ['ingest']
+    # Sai com 1 se as 10 tentativas de migrate falharem (não sobe agendador com schema velho).
+    command: ['sh', '-c', 'for i in 1 2 3 4 5 6 7 8 9 10; do npx prisma migrate deploy && exec node dist/ingest/scheduler.js; sleep 5; done; echo "prisma migrate deploy falhou 10 vezes" >&2; exit 1']
 
 volumes:
   pgdata:

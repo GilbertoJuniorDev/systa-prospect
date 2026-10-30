@@ -1,6 +1,6 @@
 import nodemailer from 'nodemailer';
 
-function createTransporter() {
+export function createTransporter() {
   const secure = process.env.SMTP_SECURE === 'true';
   const certSecure = process.env.TRUST_SMTP === 'true';
 

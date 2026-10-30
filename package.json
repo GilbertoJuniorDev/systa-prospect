@@ -6,10 +6,12 @@
   "scripts": {
     "build": "tsc",
     "dev:api": "ts-node src/api.ts",
-    "dev:ingest": "ts-node src/ingest.ts",
-    "download": "ts-node src/download.ts",
-    "ingest": "node dist/ingest.js",
+    "dev:ingest": "ts-node src/ingest/scheduler.ts",
+    "ingest": "node dist/ingest/now.js",
+    "ingest:now": "ts-node src/ingest/now.ts",
+    "ingest:scheduler": "node dist/ingest/scheduler.js",
     "start": "node dist/api.js",
+    "test": "vitest run",
     "prisma:generate": "prisma generate",
     "prisma:migrate": "prisma migrate deploy",
     "prisma:push": "prisma db push",
@@ -43,6 +45,10 @@
     "@types/unzipper": "^0.10.10",
     "prisma": "^5.14.0",
     "ts-node": "^10.9.2",
-    "typescript": "^5.4.5"
+    "typescript": "^5.4.5",
+    "vitest": "2.1.9"
+  },
+  "overrides": {
+    "rollup": "4.62.5"
   }
 }
