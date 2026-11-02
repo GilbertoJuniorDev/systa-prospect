@@ -63,6 +63,7 @@ services:
     networks:
       - default
       - systa-network
+      - easypanel
 
   ingest:
     build:
@@ -100,4 +101,7 @@ volumes:
 
 networks:
   systa-network:
+    external: true
+  # Rede do Traefik do Easypanel: sem ela o proxy não alcança a API pelo domínio público.
+  easypanel:
     external: true
