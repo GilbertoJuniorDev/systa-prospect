@@ -9,11 +9,12 @@ import { prisma } from './lib/prisma';
 import { authRoutes } from './routes/auth';
 import { consultaRoutes } from './routes/consulta';
 import { creditsRoutes } from './routes/credits';
+import { integracaoSindicalRoutes } from './routes/integracao-sindical';
 import { SITUACAO_MAP, formatFone, formatCNPJ, formatCEP } from './lib/formatters';
 import { authenticate } from './lib/authenticate';
 import { getBaseStatus, maintenanceHook } from './lib/base-status';
 
-const REQUIRED_ENV_VARS = ['DATABASE_URL', 'JWT_SECRET', 'STRIPE_SECRET_KEY', 'STRIPE_WEBHOOK_SECRET', 'INTERNAL_API_KEY'] as const;
+const REQUIRED_ENV_VARS = ['DATABASE_URL', 'JWT_SECRET', 'STRIPE_SECRET_KEY', 'STRIPE_WEBHOOK_SECRET', 'INTERNAL_API_KEY', 'SINDICAL_API_KEY'] as const;
 for (const key of REQUIRED_ENV_VARS) {
   if (!process.env[key]) {
     console.error(`FATAL: variável de ambiente "${key}" não definida.`);
@@ -535,6 +536,7 @@ async function start(): Promise<void> {
     await app.register(authRoutes, { prefix: '/auth' });
     await app.register(consultaRoutes);
     await app.register(creditsRoutes);
+    await app.register(integracaoSindicalRoutes);
     // Pré-conecta o pool do Prisma no boot para evitar timeout na 1ª consulta (cold start)
     await prisma.$connect();
     await app.listen({ port: PORT, host: '0.0.0.0' });

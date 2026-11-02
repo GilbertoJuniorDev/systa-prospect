@@ -9,9 +9,9 @@ import { deductCredits, addCredits } from '../lib/credits';
 import { getBaseStatus, cacheNotice, formatBaseDate } from '../lib/base-status';
 import { exportPricing } from '../lib/export-pricing';
 
-const MAX_EXPORT_ROWS = parseInt(process.env.MAX_EXPORT_ROWS ?? '200000', 10);
+export const MAX_EXPORT_ROWS = parseInt(process.env.MAX_EXPORT_ROWS ?? '200000', 10);
 
-interface ConsultaBody {
+export interface ConsultaBody {
   cnaes: string[];
   uf: string;
   municipios?: string[];
@@ -59,7 +59,7 @@ type ConsultaRow = {
 
 type CountRow = { total: number };
 
-function buildConsultaWhere(body: ConsultaBody): Prisma.Sql {
+export function buildConsultaWhere(body: ConsultaBody): Prisma.Sql {
   const situacaoClause =
     body.situacao === 'ativa'
       ? Prisma.sql`AND e.situacao_cadastral = '02'`
@@ -124,7 +124,7 @@ function buildParamsHash(body: ConsultaBody): string {
   return crypto.createHash('sha256').update(JSON.stringify(normalized)).digest('hex');
 }
 
-function validateBody(body: ConsultaBody): string | null {
+export function validateBody(body: ConsultaBody): string | null {
   if (!Array.isArray(body.cnaes) || body.cnaes.length === 0) {
     return 'Campo "cnaes" deve conter ao menos um código CNAE.';
   }
