@@ -60,7 +60,8 @@ export function isReceitaRoute(url: string | undefined): boolean {
     path === '/consulta' ||
     path === '/consulta/exportar' ||
     path.startsWith('/cnaes/') ||
-    path === '/municipios'
+    path === '/municipios' ||
+    path.startsWith('/integracao/sindical/')
   );
 }
 
