@@ -61,9 +61,12 @@ services:
       timeout: 5s
       retries: 3
     networks:
-      - default
-      - systa-network
-      - easypanel
+      default:
+      systa-network:
+      easypanel:
+        # Nome DNS que o Easypanel usa como destino do domínio (ver aba Domains).
+        aliases:
+          - n8n_systa-prospect_api
 
   ingest:
     build:
