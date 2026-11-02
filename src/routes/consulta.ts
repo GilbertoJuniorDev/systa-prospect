@@ -235,6 +235,7 @@ export async function consultaRoutes(app: FastifyInstance) {
   });
 
   // ─── GET /municipios?uf= ─────────────────────────────────────────────────────
+  // LIMIT 1000: a maior UF (MG) tem 853 municípios; 500 cortava os últimos do alfabeto no seletor de base territorial.
   app.get<{ Querystring: { uf?: string } }>('/municipios', async (request, reply) => {
     const uf = request.query.uf?.trim().toUpperCase() ?? '';
 
@@ -256,7 +257,7 @@ export async function consultaRoutes(app: FastifyInstance) {
           LIMIT 1
         )
         ORDER BY m.descricao
-        LIMIT 500
+        LIMIT 1000
       `;
     });
 
