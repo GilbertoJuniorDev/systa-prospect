@@ -3,6 +3,7 @@ import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { Prisma } from '@prisma/client';
 import { prisma } from '../lib/prisma';
 import { getBaseStatus } from '../lib/base-status';
+import { CNAE_DIVISOES } from '../lib/cnae-divisoes';
 import { MAX_EXPORT_ROWS, buildConsultaWhere, validateBody, type ConsultaBody } from './consulta';
 
 // Rotas máquina-a-máquina para o systa-sindical. Além do x-internal-api-key (hook global
@@ -136,6 +137,25 @@ export async function integracaoSindicalRoutes(app: FastifyInstance) {
       };
     },
   );
+
+  // ─── GET /integracao/sindical/cnae-divisoes ─────────────────────────────────
+  // Divisões CNAE (2 dígitos) que têm ao menos uma atividade na tabela "Cnae", com a
+  // contagem de atividades. Uma única agregação; os nomes vêm da lista estática.
+  app.get('/integracao/sindical/cnae-divisoes', { preHandler: [requireSindicalKey] }, async () => {
+    const rows = await prisma.$queryRaw<{ divisao: string; atividades: number }[]>`
+      SELECT left(codigo, 2) AS divisao, COUNT(*)::int AS atividades
+      FROM "Cnae"
+      GROUP BY left(codigo, 2)
+    `;
+    const atividadesPorDivisao = new Map(rows.map((r) => [r.divisao, r.atividades]));
+
+    return {
+      dados: CNAE_DIVISOES.flatMap((d) => {
+        const atividades = atividadesPorDivisao.get(d.codigo) ?? 0;
+        return atividades > 0 ? [{ codigo: d.codigo, descricao: d.descricao, atividades }] : [];
+      }),
+    };
+  });
 
   // ─── POST /integracao/sindical/empresas ─────────────────────────────────────
   app.post<{ Body: EmpresasBody }>(

@@ -91,6 +91,24 @@ describe.skipIf(!url)('rotas de integração do sindical (integração)', () => 
     expect(res.json().itens.map((i: { cnpj: string }) => i.cnpj).sort()).toEqual(['20000001000155', '20000003000155']);
   });
 
+  it('cnae-divisoes devolve só divisões com atividades, contando subclasses, ordenado por código', async () => {
+    // O beforeEach já traz 0111301 (divisão 01); aqui somam-se 2 subclasses de 47 e 1 de 56.
+    await prisma.$executeRawUnsafe(
+      `INSERT INTO "Cnae" (codigo, descricao) VALUES ('4711301', 'Hipermercados'), ('4711302', 'Supermercados'), ('5611201', 'Restaurantes')`,
+    );
+
+    const res = await app.inject({ method: 'GET', url: '/integracao/sindical/cnae-divisoes', headers: AUTH });
+
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toEqual({
+      dados: [
+        { codigo: '01', descricao: 'Agricultura, pecuária e serviços relacionados', atividades: 1 },
+        { codigo: '47', descricao: 'Comércio varejista', atividades: 2 },
+        { codigo: '56', descricao: 'Alimentação', atividades: 1 },
+      ],
+    });
+  });
+
   it('empresas devolve telefones só dígitos e omite cnpj inexistente', async () => {
     const res = await app.inject({
       method: 'POST',

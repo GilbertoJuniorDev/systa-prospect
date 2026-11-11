@@ -49,6 +49,25 @@ describe('rotas de integração do sindical (validação, sem banco)', () => {
     });
   });
 
+  describe('GET /integracao/sindical/cnae-divisoes', () => {
+    const get = (headers: Record<string, string> = AUTH) =>
+      app.inject({ method: 'GET', url: '/integracao/sindical/cnae-divisoes', headers });
+
+    it('sem x-sindical-api-key → 401', async () => {
+      const res = await get({});
+      expect(res.statusCode).toBe(401);
+      expect(res.json()).toEqual({ error: 'Unauthorized' });
+      expect(queryRaw).not.toHaveBeenCalled();
+    });
+
+    it('chave errada → 401', async () => {
+      const res = await get({ 'x-sindical-api-key': 'errada' });
+      expect(res.statusCode).toBe(401);
+      expect(res.json()).toEqual({ error: 'Unauthorized' });
+      expect(queryRaw).not.toHaveBeenCalled();
+    });
+  });
+
   it('contagem com cnae de 6 dígitos → 400', async () => {
     const res = await post('/integracao/sindical/contagem', { ...CONTAGEM, cnaes: ['011130'] });
     expect(res.statusCode).toBe(400);
