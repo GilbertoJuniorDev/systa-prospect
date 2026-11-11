@@ -73,6 +73,52 @@ describe('rotas de integração do sindical (validação, sem banco)', () => {
     });
   });
 
+  describe('POST /integracao/sindical/cnaes/descricoes', () => {
+    const URL = '/integracao/sindical/cnaes/descricoes';
+    const codigos = (n: number) => Array.from({ length: n }, (_, i) => String(1_000_000 + i));
+
+    it('sem x-sindical-api-key → 401', async () => {
+      const res = await post(URL, { cnaes: ['0111301'] }, {});
+      expect(res.statusCode).toBe(401);
+      expect(res.json()).toEqual({ error: 'Unauthorized' });
+      expect(queryRaw).not.toHaveBeenCalled();
+    });
+
+    it('cnaes vazio → 400', async () => {
+      const res = await post(URL, { cnaes: [] });
+      expect(res.statusCode).toBe(400);
+      expect(res.json()).toEqual({ error: 'Envie de 1 a 100 CNAEs.' });
+      expect(queryRaw).not.toHaveBeenCalled();
+    });
+
+    it('101 cnaes → 400', async () => {
+      const res = await post(URL, { cnaes: codigos(101) });
+      expect(res.statusCode).toBe(400);
+      expect(res.json()).toEqual({ error: 'Envie de 1 a 100 CNAEs.' });
+      expect(queryRaw).not.toHaveBeenCalled();
+    });
+
+    it('cnaes que não é array → 400', async () => {
+      const res = await post(URL, { cnaes: '0111301' });
+      expect(res.statusCode).toBe(400);
+      expect(queryRaw).not.toHaveBeenCalled();
+    });
+
+    it('cnae com 3 dígitos → 400', async () => {
+      const res = await post(URL, { cnaes: ['123'] });
+      expect(res.statusCode).toBe(400);
+      expect(res.json().error).toContain('CNAE inválido');
+      expect(queryRaw).not.toHaveBeenCalled();
+    });
+
+    it('100 cnaes válidos passam da validação', async () => {
+      queryRaw.mockResolvedValue([]);
+      const res = await post(URL, { cnaes: codigos(100) });
+      expect(res.statusCode).toBe(200);
+      expect(res.json().dados).toHaveLength(100);
+    });
+  });
+
   it('contagem com cnae de 6 dígitos → 400', async () => {
     const res = await post('/integracao/sindical/contagem', { ...CONTAGEM, cnaes: ['011130'] });
     expect(res.statusCode).toBe(400);

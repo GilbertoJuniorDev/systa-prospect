@@ -11,6 +11,7 @@ import { MAX_EXPORT_ROWS, buildConsultaWhere, validateBody, type ConsultaBody } 
 // do prospect não dê acesso à base completa de empresas.
 
 const MAX_CNPJS_POR_LOTE = 500;
+const MAX_CNAES_DESCRICOES = 100;
 
 type MeiFiltro = ConsultaBody['mei'];
 
@@ -219,6 +220,37 @@ export async function integracaoSindicalRoutes(app: FastifyInstance) {
       }),
     };
   });
+
+  // ─── POST /integracao/sindical/cnaes/descricoes ─────────────────────────────
+  // Descrições de vários CNAEs numa só chamada (o sindical antes fazia uma busca por
+  // código e estourava o rate limit global do prospect). Devolve na ordem e com as
+  // repetições do pedido; código fora da tabela "Cnae" volta com descricao null.
+  app.post<{ Body: { cnaes?: unknown } }>(
+    '/integracao/sindical/cnaes/descricoes',
+    { preHandler: [requireSindicalKey] },
+    async (request, reply) => {
+      const cnaes = request.body?.cnaes;
+      if (!Array.isArray(cnaes) || cnaes.length < 1 || cnaes.length > MAX_CNAES_DESCRICOES) {
+        return reply.status(400).send({ error: `Envie de 1 a ${MAX_CNAES_DESCRICOES} CNAEs.` });
+      }
+      const invalido = cnaes.find((c) => typeof c !== 'string' || !/^\d{7}$/.test(c));
+      if (invalido !== undefined) {
+        return reply
+          .status(400)
+          .send({ error: `CNAE inválido: "${String(invalido)}". Deve conter exatamente 7 dígitos.` });
+      }
+      const codigos = cnaes as string[];
+
+      const rows = await prisma.$queryRaw<{ codigo: string; descricao: string }[]>`
+        SELECT codigo, descricao FROM "Cnae" WHERE codigo = ANY(${[...new Set(codigos)]}::text[])
+      `;
+      const descricaoPorCodigo = new Map(rows.map((r) => [r.codigo, r.descricao]));
+
+      return {
+        dados: codigos.map((codigo) => ({ codigo, descricao: descricaoPorCodigo.get(codigo) ?? null })),
+      };
+    },
+  );
 
   // ─── POST /integracao/sindical/empresas ─────────────────────────────────────
   app.post<{ Body: EmpresasBody }>(

@@ -169,6 +169,24 @@ describe.skipIf(!url)('rotas de integração do sindical (integração)', () => 
     });
   });
 
+  it('cnaes/descricoes devolve descrição na ordem do pedido, null para código ausente e preserva repetições', async () => {
+    const res = await app.inject({
+      method: 'POST',
+      url: '/integracao/sindical/cnaes/descricoes',
+      headers: AUTH,
+      payload: { cnaes: ['0111301', '9999999', '0111301'] },
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toEqual({
+      dados: [
+        { codigo: '0111301', descricao: 'Cultivo de arroz' },
+        { codigo: '9999999', descricao: null },
+        { codigo: '0111301', descricao: 'Cultivo de arroz' },
+      ],
+    });
+  });
+
   it('empresas devolve telefones só dígitos e omite cnpj inexistente', async () => {
     const res = await app.inject({
       method: 'POST',
