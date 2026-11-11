@@ -3,8 +3,12 @@ import Fastify, { type FastifyInstance } from 'fastify';
 
 // Sem banco: as validações respondem antes de qualquer consulta.
 const queryRaw = vi.fn();
+const transaction = vi.fn();
 vi.mock('../../src/lib/prisma', () => ({
-  prisma: { $queryRaw: (...a: unknown[]) => queryRaw(...a), $transaction: vi.fn() },
+  prisma: {
+    $queryRaw: (...a: unknown[]) => queryRaw(...a),
+    $transaction: (...a: unknown[]) => transaction(...a),
+  },
 }));
 
 import { integracaoSindicalRoutes } from '../../src/routes/integracao-sindical';
@@ -26,6 +30,7 @@ describe('rotas de integração do sindical (validação, sem banco)', () => {
 
   beforeEach(() => {
     queryRaw.mockReset();
+    transaction.mockReset();
   });
 
   afterAll(async () => {
@@ -79,6 +84,63 @@ describe('rotas de integração do sindical (validação, sem banco)', () => {
     const res = await post('/integracao/sindical/contagem', { ...CONTAGEM, situacao: 'inativa' });
     expect(res.statusCode).toBe(400);
     expect(queryRaw).not.toHaveBeenCalled();
+  });
+
+  describe('contagem: divisoes e mei (validação)', () => {
+    const contagemSem = (extra: object) => {
+      const { cnaes: _cnaes, ...resto } = CONTAGEM;
+      return { ...resto, ...extra };
+    };
+
+    it.each([['4'], ['047'], ['ab'], ['04']])('divisão %s inválida → 400', async (codigo) => {
+      const res = await post('/integracao/sindical/contagem', { ...CONTAGEM, divisoes: [codigo] });
+      expect(res.statusCode).toBe(400);
+      expect(res.json().error).toContain('Divisão inválida');
+      expect(queryRaw).not.toHaveBeenCalled();
+      expect(transaction).not.toHaveBeenCalled();
+    });
+
+    it('divisão repetida → 400', async () => {
+      const res = await post('/integracao/sindical/contagem', { ...CONTAGEM, divisoes: ['47', '47'] });
+      expect(res.statusCode).toBe(400);
+      expect(res.json().error).toContain('Divisão repetida');
+      expect(queryRaw).not.toHaveBeenCalled();
+    });
+
+    it('divisoes que não é array → 400', async () => {
+      const res = await post('/integracao/sindical/contagem', { ...CONTAGEM, divisoes: '47' });
+      expect(res.statusCode).toBe(400);
+      expect(res.json().error).toContain('divisoes');
+      expect(queryRaw).not.toHaveBeenCalled();
+    });
+
+    it('mei inválido → 400', async () => {
+      const res = await post('/integracao/sindical/contagem', { ...CONTAGEM, mei: 'talvez' });
+      expect(res.statusCode).toBe(400);
+      expect(res.json().error).toContain('Campo "mei"');
+      expect(queryRaw).not.toHaveBeenCalled();
+    });
+
+    it('cnaes e divisoes vazios → 400', async () => {
+      const res = await post('/integracao/sindical/contagem', { ...CONTAGEM, cnaes: [], divisoes: [] });
+      expect(res.statusCode).toBe(400);
+      expect(res.json().error).toBe('Informe ao menos um CNAE ou uma divisão.');
+      expect(queryRaw).not.toHaveBeenCalled();
+    });
+
+    it('cnae avulso malformado com divisão → 400 antes de consultar o banco', async () => {
+      const res = await post('/integracao/sindical/contagem', { ...CONTAGEM, cnaes: ['011130'], divisoes: ['47'] });
+      expect(res.statusCode).toBe(400);
+      expect(res.json().error).toContain('CNAE inválido');
+      expect(queryRaw).not.toHaveBeenCalled();
+    });
+
+    it('cnaes ausente com divisoes é aceito (sem 400 de validação)', async () => {
+      queryRaw.mockResolvedValue([{ codigo: '4711301' }]);
+      transaction.mockResolvedValue([]);
+      const res = await post('/integracao/sindical/contagem', contagemSem({ divisoes: ['47'] }));
+      expect(res.statusCode).not.toBe(400);
+    });
   });
 
   it('contagem sem body → 400', async () => {

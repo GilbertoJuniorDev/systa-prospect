@@ -19,18 +19,23 @@ const AUTH = { 'x-sindical-api-key': KEY };
 describe.skipIf(!url)('rotas de integração do sindical (integração)', () => {
   let app: FastifyInstance;
 
-  async function insertEstab(base: string, municipio: string, situacao: string, extra: { ddd1?: string; tel1?: string } = {}) {
+  async function insertEstab(
+    base: string,
+    municipio: string,
+    situacao: string,
+    extra: { ddd1?: string; tel1?: string; cnae?: string } = {},
+  ) {
     await prisma.$executeRawUnsafe(
       `INSERT INTO "Estabelecimento"
          (cnpj_base, cnpj_ordem, cnpj_dv, identificador_matriz_filial, situacao_cadastral,
           cnae_fiscal_principal, uf, municipio, data_inicio_atividade, ddd1, telefone1, correio_eletronico)
-       VALUES ($1, '0001', '55', '1', $2, '0111301', 'SP', $3, '20150310', $4, $5, 'contato@teste.com')`,
-      base, situacao, municipio, extra.ddd1 ?? null, extra.tel1 ?? null,
+       VALUES ($1, '0001', '55', '1', $2, $6, 'SP', $3, '20150310', $4, $5, 'contato@teste.com')`,
+      base, situacao, municipio, extra.ddd1 ?? null, extra.tel1 ?? null, extra.cnae ?? '0111301',
     );
   }
 
   async function cleanup() {
-    await prisma.$executeRawUnsafe('TRUNCATE "Estabelecimento", "Empresa", "Cnae", "Municipio", "IngestRun" CASCADE');
+    await prisma.$executeRawUnsafe('TRUNCATE "Estabelecimento", "Empresa", "Cnae", "Municipio", "IngestRun", "Simples" CASCADE');
   }
 
   beforeAll(async () => {
@@ -76,6 +81,61 @@ describe.skipIf(!url)('rotas de integração do sindical (integração)', () => 
       { cnpj: '20000001000155', municipio: '7107', municipioNome: 'SAO PAULO' },
     ]);
     expect(res.json()).toHaveProperty('baseMes');
+    expect(res.json().filtros).toEqual({ divisoes: [], mei: 'todos' });
+  });
+
+  describe('contagem por divisão e MEI', () => {
+    const cnpjs = (res: { json: () => { itens: { cnpj: string }[] } }) =>
+      res.json().itens.map((i) => i.cnpj).sort();
+
+    beforeEach(async () => {
+      // 20000004: ativo no 7107, CNAE da divisão 47, optante MEI.
+      await prisma.$executeRawUnsafe(`INSERT INTO "Cnae" (codigo, descricao) VALUES ('4711301', 'Hipermercados')`);
+      await prisma.$executeRawUnsafe(
+        `INSERT INTO "Empresa" (cnpj_base, razao_social, natureza_juridica, qualificacao_resp, capital_social, porte)
+         VALUES ('20000004', 'EMPRESA 20000004 LTDA', '2062', '49', 1000, '01')`,
+      );
+      await insertEstab('20000004', '7107', '02', { cnae: '4711301' });
+      await prisma.$executeRawUnsafe(
+        `INSERT INTO "Simples" (cnpj_base, opcao_mei) VALUES ('20000004', 'S')`,
+      );
+    });
+
+    const base = { uf: 'SP', municipios: ['7107'], situacao: 'ativa' };
+
+    it('só divisão → apenas os estabelecimentos da divisão, com eco dos filtros', async () => {
+      const res = await contagem({ ...base, cnaes: [], divisoes: ['47'] });
+
+      expect(res.statusCode).toBe(200);
+      expect(cnpjs(res)).toEqual(['20000004000155']);
+      expect(res.json().filtros).toEqual({ divisoes: ['47'], mei: 'todos' });
+    });
+
+    it('divisão + CNAE avulso → união dos dois', async () => {
+      const res = await contagem({ ...base, cnaes: ['0111301'], divisoes: ['47'] });
+
+      expect(cnpjs(res)).toEqual(['20000001000155', '20000004000155']);
+    });
+
+    it('mei nao e sim particionam o resultado de todos', async () => {
+      const payload = { ...base, cnaes: ['0111301'], divisoes: ['47'] };
+      const nao = await contagem({ ...payload, mei: 'nao' });
+      const sim = await contagem({ ...payload, mei: 'sim' });
+      const todos = await contagem({ ...payload, mei: 'todos' });
+
+      expect(cnpjs(nao)).toEqual(['20000001000155']);
+      expect(cnpjs(sim)).toEqual(['20000004000155']);
+      expect([...cnpjs(nao), ...cnpjs(sim)].sort()).toEqual(cnpjs(todos));
+      expect(sim.json().filtros).toEqual({ divisoes: ['47'], mei: 'sim' });
+    });
+
+    it('divisão sem subclasses na base → itens vazios, sem erro', async () => {
+      const res = await contagem({ ...base, cnaes: [], divisoes: ['03'] });
+
+      expect(res.statusCode).toBe(200);
+      expect(res.json().itens).toEqual([]);
+      expect(res.json().filtros).toEqual({ divisoes: ['03'], mei: 'todos' });
+    });
   });
 
   it('contagem situacao todas inclui a baixada', async () => {

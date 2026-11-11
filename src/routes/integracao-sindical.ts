@@ -3,7 +3,7 @@ import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { Prisma } from '@prisma/client';
 import { prisma } from '../lib/prisma';
 import { getBaseStatus } from '../lib/base-status';
-import { CNAE_DIVISOES } from '../lib/cnae-divisoes';
+import { CNAE_DIVISOES, CODIGOS_DIVISAO } from '../lib/cnae-divisoes';
 import { MAX_EXPORT_ROWS, buildConsultaWhere, validateBody, type ConsultaBody } from './consulta';
 
 // Rotas máquina-a-máquina para o systa-sindical. Além do x-internal-api-key (hook global
@@ -12,11 +12,33 @@ import { MAX_EXPORT_ROWS, buildConsultaWhere, validateBody, type ConsultaBody } 
 
 const MAX_CNPJS_POR_LOTE = 500;
 
+type MeiFiltro = ConsultaBody['mei'];
+
 interface ContagemBody {
-  cnaes: string[];
+  cnaes?: string[];
+  divisoes?: string[];
   uf: string;
   municipios: string[];
   situacao: 'ativa' | 'todas';
+  mei?: MeiFiltro;
+}
+
+// Só serve para validateBody aceitar a consulta quando ela vem apenas com divisões:
+// os CNAEs reais são resolvidos depois, no banco.
+const CNAE_PLACEHOLDER = '0000000';
+
+/** Valida `divisoes` (2 dígitos, existentes na CNAE 2.3, sem repetição). Retorna a mensagem de erro, se houver. */
+function validateDivisoes(divisoes: unknown): string | null {
+  if (!Array.isArray(divisoes)) return 'Campo "divisoes" deve ser uma lista de códigos de divisão.';
+  const vistas = new Set<string>();
+  for (const d of divisoes) {
+    if (typeof d !== 'string' || !/^\d{2}$/.test(d) || !CODIGOS_DIVISAO.has(d)) {
+      return `Divisão inválida: "${String(d)}". Deve ser um código de 2 dígitos da CNAE.`;
+    }
+    if (vistas.has(d)) return `Divisão repetida: "${d}".`;
+    vistas.add(d);
+  }
+  return null;
 }
 
 interface EmpresasBody {
@@ -84,24 +106,64 @@ export async function integracaoSindicalRoutes(app: FastifyInstance) {
         return reply.status(400).send({ error: 'Campo "situacao" deve ser "ativa" ou "todas".' });
       }
 
-      // mei fixo em 'todos': a importação não filtra por MEI, então nem precisa do join com Simples.
-      const consulta: ConsultaBody = {
-        cnaes: body.cnaes,
+      const mei: MeiFiltro = body.mei ?? 'todos';
+      const divisoes = body.divisoes ?? [];
+      const divisoesErr = validateDivisoes(divisoes);
+      if (divisoesErr) return reply.status(400).send({ error: divisoesErr });
+
+      const cnaesAvulsos = body.cnaes ?? [];
+      if (!Array.isArray(cnaesAvulsos)) {
+        return reply.status(400).send({ error: 'Campo "cnaes" deve conter ao menos um código CNAE.' });
+      }
+      if (cnaesAvulsos.length === 0 && divisoes.length === 0) {
+        return reply.status(400).send({ error: 'Informe ao menos um CNAE ou uma divisão.' });
+      }
+
+      // Valida tudo antes de tocar no banco; com só divisões, o placeholder satisfaz a regra "ao menos um CNAE".
+      const err = validateBody({
+        cnaes: cnaesAvulsos.length > 0 ? cnaesAvulsos : [CNAE_PLACEHOLDER],
         uf: body.uf,
         municipios: body.municipios,
         situacao: body.situacao,
-        mei: 'todos',
-      };
-      const err = validateBody(consulta);
+        mei,
+      });
       if (err) return reply.status(400).send({ error: err });
 
+      // Eco dos filtros efetivamente aplicados, para o chamador gravar na consulta.
+      const filtros = { divisoes: [...divisoes].sort(), mei };
+      const base = await getBaseStatus();
+
+      // A divisão é o prefixo de 2 dígitos do CNAE principal; expande para as subclasses existentes.
+      let cnaes = [...new Set(cnaesAvulsos)];
+      if (divisoes.length > 0) {
+        const expandidos = await prisma.$queryRaw<{ codigo: string }[]>`
+          SELECT codigo FROM "Cnae" WHERE left(codigo, 2) = ANY(${divisoes})
+        `;
+        cnaes = [...new Set([...cnaes, ...expandidos.map((r) => r.codigo)])];
+      }
+      // Divisão sem nenhuma subclasse na base: nada a contar.
+      if (cnaes.length === 0) {
+        return { baseMes: base.month, itens: [], filtros };
+      }
+
+      const consulta: ConsultaBody = {
+        cnaes,
+        uf: body.uf,
+        municipios: body.municipios,
+        situacao: body.situacao,
+        mei,
+      };
       const where = buildConsultaWhere(consulta);
+      // O filtro de MEI referencia o alias "s"; sem filtro, o join com Simples é custo à toa.
+      const simplesJoin =
+        mei === 'todos' ? Prisma.empty : Prisma.sql`LEFT JOIN "Simples" s ON s.cnpj_base = e.cnpj_base`;
 
       const countRows = await prisma.$transaction(async (tx) => {
         await tx.$executeRaw`SET LOCAL work_mem = '4MB'`;
         return tx.$queryRaw<{ total: number }[]>`
           SELECT COUNT(*)::int AS total
           FROM "Estabelecimento" e
+          ${simplesJoin}
           ${where}
         `;
       });
@@ -122,11 +184,11 @@ export async function integracaoSindicalRoutes(app: FastifyInstance) {
                  m.descricao AS municipio_nome
           FROM "Estabelecimento" e
           LEFT JOIN "Municipio" m ON m.codigo = e.municipio
+          ${simplesJoin}
           ${where}
         `;
       });
 
-      const base = await getBaseStatus();
       return {
         baseMes: base.month,
         itens: rows.map((r) => ({
@@ -134,6 +196,7 @@ export async function integracaoSindicalRoutes(app: FastifyInstance) {
           municipio: r.municipio,
           municipioNome: r.municipio_nome,
         })),
+        filtros,
       };
     },
   );
