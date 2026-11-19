@@ -11,7 +11,7 @@ import { MAX_EXPORT_ROWS, buildConsultaWhere, validateBody, type ConsultaBody } 
 // do prospect não dê acesso à base completa de empresas.
 
 const MAX_CNPJS_POR_LOTE = 500;
-const MAX_CNAES_DESCRICOES = 100;
+const MAX_CNAES_DESCRICOES = 500;
 
 type MeiFiltro = ConsultaBody['mei'];
 
@@ -224,6 +224,15 @@ export async function integracaoSindicalRoutes(app: FastifyInstance) {
         return atividades > 0 ? [{ codigo: d.codigo, descricao: d.descricao, atividades }] : [];
       }),
     };
+  });
+
+  // ─── GET /integracao/sindical/cnaes ─────────────────────────────────────────
+  // Catálogo inteiro (~1.300 linhas): o sindical filtra localmente.
+  app.get('/integracao/sindical/cnaes', { preHandler: [requireSindicalKey] }, async () => {
+    const dados = await prisma.$queryRaw<{ codigo: string; descricao: string }[]>`
+      SELECT codigo, descricao FROM "Cnae" ORDER BY codigo
+    `;
+    return { dados };
   });
 
   // ─── POST /integracao/sindical/cnaes/descricoes ─────────────────────────────

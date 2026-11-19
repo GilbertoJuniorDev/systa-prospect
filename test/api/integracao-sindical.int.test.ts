@@ -169,6 +169,24 @@ describe.skipIf(!url)('rotas de integração do sindical (integração)', () => 
     });
   });
 
+  it('cnaes devolve o catálogo inteiro ordenado por código', async () => {
+    // O beforeEach já traz 0111301; insere fora de ordem para provar o ORDER BY.
+    await prisma.$executeRawUnsafe(
+      `INSERT INTO "Cnae" (codigo, descricao) VALUES ('5611201', 'Restaurantes'), ('4711301', 'Hipermercados')`,
+    );
+
+    const res = await app.inject({ method: 'GET', url: '/integracao/sindical/cnaes', headers: AUTH });
+
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toEqual({
+      dados: [
+        { codigo: '0111301', descricao: 'Cultivo de arroz' },
+        { codigo: '4711301', descricao: 'Hipermercados' },
+        { codigo: '5611201', descricao: 'Restaurantes' },
+      ],
+    });
+  });
+
   it('cnaes/descricoes devolve descrição na ordem do pedido, null para código ausente e preserva repetições', async () => {
     const res = await app.inject({
       method: 'POST',

@@ -73,6 +73,25 @@ describe('rotas de integração do sindical (validação, sem banco)', () => {
     });
   });
 
+  describe('GET /integracao/sindical/cnaes', () => {
+    const get = (headers: Record<string, string> = AUTH) =>
+      app.inject({ method: 'GET', url: '/integracao/sindical/cnaes', headers });
+
+    it('sem x-sindical-api-key → 401', async () => {
+      const res = await get({});
+      expect(res.statusCode).toBe(401);
+      expect(res.json()).toEqual({ error: 'Unauthorized' });
+      expect(queryRaw).not.toHaveBeenCalled();
+    });
+
+    it('chave errada → 401', async () => {
+      const res = await get({ 'x-sindical-api-key': 'errada' });
+      expect(res.statusCode).toBe(401);
+      expect(res.json()).toEqual({ error: 'Unauthorized' });
+      expect(queryRaw).not.toHaveBeenCalled();
+    });
+  });
+
   describe('POST /integracao/sindical/cnaes/descricoes', () => {
     const URL = '/integracao/sindical/cnaes/descricoes';
     const codigos = (n: number) => Array.from({ length: n }, (_, i) => String(1_000_000 + i));
@@ -87,14 +106,14 @@ describe('rotas de integração do sindical (validação, sem banco)', () => {
     it('cnaes vazio → 400', async () => {
       const res = await post(URL, { cnaes: [] });
       expect(res.statusCode).toBe(400);
-      expect(res.json()).toEqual({ error: 'Envie de 1 a 100 CNAEs.' });
+      expect(res.json()).toEqual({ error: 'Envie de 1 a 500 CNAEs.' });
       expect(queryRaw).not.toHaveBeenCalled();
     });
 
-    it('101 cnaes → 400', async () => {
-      const res = await post(URL, { cnaes: codigos(101) });
+    it('501 cnaes → 400', async () => {
+      const res = await post(URL, { cnaes: codigos(501) });
       expect(res.statusCode).toBe(400);
-      expect(res.json()).toEqual({ error: 'Envie de 1 a 100 CNAEs.' });
+      expect(res.json()).toEqual({ error: 'Envie de 1 a 500 CNAEs.' });
       expect(queryRaw).not.toHaveBeenCalled();
     });
 
@@ -111,11 +130,11 @@ describe('rotas de integração do sindical (validação, sem banco)', () => {
       expect(queryRaw).not.toHaveBeenCalled();
     });
 
-    it('100 cnaes válidos passam da validação', async () => {
+    it('500 cnaes válidos passam da validação', async () => {
       queryRaw.mockResolvedValue([]);
-      const res = await post(URL, { cnaes: codigos(100) });
+      const res = await post(URL, { cnaes: codigos(500) });
       expect(res.statusCode).toBe(200);
-      expect(res.json().dados).toHaveLength(100);
+      expect(res.json().dados).toHaveLength(500);
     });
   });
 
@@ -217,6 +236,7 @@ describe('rotas de integração do sindical (validação, sem banco)', () => {
   it('isReceitaRoute cobre as rotas de integração (503 em manutenção)', () => {
     expect(isReceitaRoute('/integracao/sindical/contagem')).toBe(true);
     expect(isReceitaRoute('/integracao/sindical/empresas')).toBe(true);
+    expect(isReceitaRoute('/integracao/sindical/cnaes')).toBe(true);
     expect(isReceitaRoute('/integracao/outra')).toBe(false);
   });
 });
