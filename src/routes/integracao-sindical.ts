@@ -73,9 +73,13 @@ type EmpresaRow = {
   correio_eletronico: string | null;
 };
 
+/** Criado uma vez: `localeCompare` com locale monta um collator a cada comparação (até 200 mil itens). */
+const RAZAO_SOCIAL = new Intl.Collator('pt-BR');
+
 type ExportarRow = {
   cnpj: string;
-  razao_social: string;
+  /** `null` quando o estabelecimento não tem linha em "Empresa" (LEFT JOIN). */
+  razao_social: string | null;
   nome_fantasia: string | null;
   identificador_matriz_filial: string | null;
   situacao_cadastral: string | null;
@@ -312,7 +316,8 @@ export async function integracaoSindicalRoutes(app: FastifyInstance) {
 
       const itens = rows.map((r) => ({
         cnpj: r.cnpj,
-        razaoSocial: r.razao_social?.trim() ?? '',
+        // Sem razão social (sem "Empresa" ou em branco), o nome fantasia é o melhor nome para a planilha.
+        razaoSocial: r.razao_social?.trim() || r.nome_fantasia?.trim() || '',
         nomeFantasia: r.nome_fantasia?.trim() || null,
         matrizFilial:
           r.identificador_matriz_filial === '1' ? 'Matriz' : r.identificador_matriz_filial === '2' ? 'Filial' : null,
@@ -341,7 +346,7 @@ export async function integracaoSindicalRoutes(app: FastifyInstance) {
       // as linhas antes de aplicar o LIMIT, mesmo quando a consulta estoura o teto e só vai virar 400.
       // Depois do teto garantido são no máximo MAX_EXPORT_ROWS itens; o CNPJ desempata para o
       // resultado ser determinístico entre exportações repetidas.
-      itens.sort((a, b) => a.razaoSocial.localeCompare(b.razaoSocial, 'pt-BR') || a.cnpj.localeCompare(b.cnpj));
+      itens.sort((a, b) => RAZAO_SOCIAL.compare(a.razaoSocial, b.razaoSocial) || a.cnpj.localeCompare(b.cnpj));
 
       return { baseMes: base.month, itens, filtros };
     },

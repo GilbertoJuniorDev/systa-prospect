@@ -132,6 +132,20 @@ describe.skipIf(!url)('POST /integracao/sindical/exportar (integração)', () =>
     ]);
   });
 
+  it('sem razão social (sem Empresa ou em branco) usa o nome fantasia', async () => {
+    await insertEmpresa('40000006', '   ');
+    await insertEstab('40000005', '1');
+    await insertEstab('40000006', '1');
+
+    const res = await exportar(base);
+
+    const porCnpj = new Map(
+      res.json().itens.map((i: { cnpj: string; razaoSocial: string }) => [i.cnpj, i.razaoSocial]),
+    );
+    expect(porCnpj.get('40000005000155')).toBe('FANTASIA');
+    expect(porCnpj.get('40000006000155')).toBe('FANTASIA');
+  });
+
   it('mei "nao" devolve só o filial; "sim" só o matriz', async () => {
     const nao = await exportar({ ...base, mei: 'nao' });
     const sim = await exportar({ ...base, mei: 'sim' });
