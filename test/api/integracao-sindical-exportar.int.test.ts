@@ -116,6 +116,22 @@ describe.skipIf(!url)('POST /integracao/sindical/exportar (integração)', () =>
     });
   });
 
+  it('razão social igual desempata por CNPJ, independente da ordem de inserção', async () => {
+    await insertEmpresa('40000004', 'GAMA LTDA');
+    await insertEmpresa('40000003', 'GAMA LTDA');
+    await insertEstab('40000004', '1');
+    await insertEstab('40000003', '2');
+
+    const res = await exportar(base);
+
+    expect(res.json().itens.map((i: { cnpj: string }) => i.cnpj)).toEqual([
+      '40000001000155',
+      '40000002000155',
+      '40000003000155',
+      '40000004000155',
+    ]);
+  });
+
   it('mei "nao" devolve só o filial; "sim" só o matriz', async () => {
     const nao = await exportar({ ...base, mei: 'nao' });
     const sim = await exportar({ ...base, mei: 'sim' });

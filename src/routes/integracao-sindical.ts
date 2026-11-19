@@ -302,7 +302,6 @@ export async function integracaoSindicalRoutes(app: FastifyInstance) {
           LEFT JOIN "Municipio" m ON m.codigo = e.municipio
           LEFT JOIN "Cnae" cn ON cn.codigo = e.cnae_fiscal_principal
           ${where}
-          ORDER BY emp.razao_social
           LIMIT ${MAX_EXPORT_ROWS + 1}
         `;
       });
@@ -311,36 +310,40 @@ export async function integracaoSindicalRoutes(app: FastifyInstance) {
         return reply.status(400).send(await erroAcimaDoTeto(simplesJoin, where, rows.length));
       }
 
-      return {
-        baseMes: base.month,
-        itens: rows.map((r) => ({
-          cnpj: r.cnpj,
-          razaoSocial: r.razao_social?.trim() ?? '',
-          nomeFantasia: r.nome_fantasia?.trim() || null,
-          matrizFilial:
-            r.identificador_matriz_filial === '1' ? 'Matriz' : r.identificador_matriz_filial === '2' ? 'Filial' : null,
-          situacao: r.situacao_cadastral ? (SITUACAO_MAP[r.situacao_cadastral] ?? r.situacao_cadastral) : null,
-          dataInicioAtividade: r.data_inicio_atividade,
-          cnaeCodigo: r.cnae_codigo,
-          cnaeDescricao: r.cnae_descricao,
-          mei: r.opcao_mei === 'S',
-          uf: r.uf,
-          municipio: r.municipio,
-          municipioNome: r.municipio_nome,
-          tipoLogradouro: r.tipo_logradouro,
-          logradouro: r.logradouro,
-          numero: r.numero,
-          complemento: r.complemento,
-          bairro: r.bairro,
-          cep: r.cep,
-          telefones: [
-            telefoneDigitos(r.ddd1, r.telefone1),
-            telefoneDigitos(r.ddd2, r.telefone2),
-          ].filter((t): t is string => t !== null),
-          email: r.correio_eletronico?.trim().toLowerCase() || null,
-        })),
-        filtros,
-      };
+      const itens = rows.map((r) => ({
+        cnpj: r.cnpj,
+        razaoSocial: r.razao_social?.trim() ?? '',
+        nomeFantasia: r.nome_fantasia?.trim() || null,
+        matrizFilial:
+          r.identificador_matriz_filial === '1' ? 'Matriz' : r.identificador_matriz_filial === '2' ? 'Filial' : null,
+        situacao: r.situacao_cadastral ? (SITUACAO_MAP[r.situacao_cadastral] ?? r.situacao_cadastral) : null,
+        dataInicioAtividade: r.data_inicio_atividade,
+        cnaeCodigo: r.cnae_codigo,
+        cnaeDescricao: r.cnae_descricao,
+        mei: r.opcao_mei === 'S',
+        uf: r.uf,
+        municipio: r.municipio,
+        municipioNome: r.municipio_nome,
+        tipoLogradouro: r.tipo_logradouro,
+        logradouro: r.logradouro,
+        numero: r.numero,
+        complemento: r.complemento,
+        bairro: r.bairro,
+        cep: r.cep,
+        telefones: [
+          telefoneDigitos(r.ddd1, r.telefone1),
+          telefoneDigitos(r.ddd2, r.telefone2),
+        ].filter((t): t is string => t !== null),
+        email: r.correio_eletronico?.trim().toLowerCase() || null,
+      }));
+
+      // Ordenar no SQL (ORDER BY emp.razao_social) obrigaria o banco a juntar Empresa e varrer todas
+      // as linhas antes de aplicar o LIMIT, mesmo quando a consulta estoura o teto e só vai virar 400.
+      // Depois do teto garantido são no máximo MAX_EXPORT_ROWS itens; o CNPJ desempata para o
+      // resultado ser determinístico entre exportações repetidas.
+      itens.sort((a, b) => a.razaoSocial.localeCompare(b.razaoSocial, 'pt-BR') || a.cnpj.localeCompare(b.cnpj));
+
+      return { baseMes: base.month, itens, filtros };
     },
   );
 
