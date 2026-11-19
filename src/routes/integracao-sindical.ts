@@ -159,24 +159,9 @@ export async function integracaoSindicalRoutes(app: FastifyInstance) {
       const simplesJoin =
         mei === 'todos' ? Prisma.empty : Prisma.sql`LEFT JOIN "Simples" s ON s.cnpj_base = e.cnpj_base`;
 
-      const countRows = await prisma.$transaction(async (tx) => {
-        await tx.$executeRaw`SET LOCAL work_mem = '4MB'`;
-        return tx.$queryRaw<{ total: number }[]>`
-          SELECT COUNT(*)::int AS total
-          FROM "Estabelecimento" e
-          ${simplesJoin}
-          ${where}
-        `;
-      });
-      const total = countRows[0]?.total ?? 0;
-
-      if (total > MAX_EXPORT_ROWS) {
-        return reply.status(400).send({
-          error: `A consulta retornou ${total.toLocaleString('pt-BR')} registros. Limite máximo é ${MAX_EXPORT_ROWS.toLocaleString('pt-BR')}. Refine os filtros para continuar.`,
-          total,
-        });
-      }
-
+      // Uma única varredura: antes um COUNT e o SELECT repetiam o mesmo filtro caro (70 CNAEs em
+      // um município levavam ~70 s e estouravam os timeouts de quem chama). O LIMIT +1 só serve
+      // para detectar que o teto foi passado sem trazer a base inteira para a memória.
       const rows = await prisma.$transaction(async (tx) => {
         await tx.$executeRaw`SET LOCAL work_mem = '4MB'`;
         return tx.$queryRaw<ContagemRow[]>`
@@ -187,8 +172,28 @@ export async function integracaoSindicalRoutes(app: FastifyInstance) {
           LEFT JOIN "Municipio" m ON m.codigo = e.municipio
           ${simplesJoin}
           ${where}
+          LIMIT ${MAX_EXPORT_ROWS + 1}
         `;
       });
+
+      if (rows.length > MAX_EXPORT_ROWS) {
+        // Caminho raro: o total exato só é calculado quando o limite estoura, para a mensagem
+        // (e o campo `total` que o sindical lê) continuarem com o número real.
+        const countRows = await prisma.$transaction(async (tx) => {
+          await tx.$executeRaw`SET LOCAL work_mem = '4MB'`;
+          return tx.$queryRaw<{ total: number }[]>`
+            SELECT COUNT(*)::int AS total
+            FROM "Estabelecimento" e
+            ${simplesJoin}
+            ${where}
+          `;
+        });
+        const total = countRows[0]?.total ?? rows.length;
+        return reply.status(400).send({
+          error: `A consulta retornou ${total.toLocaleString('pt-BR')} registros. Limite máximo é ${MAX_EXPORT_ROWS.toLocaleString('pt-BR')}. Refine os filtros para continuar.`,
+          total,
+        });
+      }
 
       return {
         baseMes: base.month,
