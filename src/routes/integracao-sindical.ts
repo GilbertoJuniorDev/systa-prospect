@@ -4,6 +4,7 @@ import { Prisma } from '@prisma/client';
 import { prisma } from '../lib/prisma';
 import { getBaseStatus } from '../lib/base-status';
 import { CNAE_DIVISOES, CODIGOS_DIVISAO } from '../lib/cnae-divisoes';
+import { SITUACAO_MAP } from '../lib/formatters';
 import { MAX_EXPORT_ROWS, buildConsultaWhere, validateBody, type ConsultaBody } from './consulta';
 
 // Rotas máquina-a-máquina para o systa-sindical. Além do x-internal-api-key (hook global
@@ -72,6 +73,41 @@ type EmpresaRow = {
   correio_eletronico: string | null;
 };
 
+type ExportarRow = {
+  cnpj: string;
+  razao_social: string;
+  nome_fantasia: string | null;
+  identificador_matriz_filial: string | null;
+  situacao_cadastral: string | null;
+  data_inicio_atividade: string | null;
+  cnae_codigo: string | null;
+  cnae_descricao: string | null;
+  opcao_mei: string | null;
+  uf: string | null;
+  municipio: string | null;
+  municipio_nome: string | null;
+  tipo_logradouro: string | null;
+  logradouro: string | null;
+  numero: string | null;
+  complemento: string | null;
+  bairro: string | null;
+  cep: string | null;
+  ddd1: string | null;
+  telefone1: string | null;
+  ddd2: string | null;
+  telefone2: string | null;
+  correio_eletronico: string | null;
+};
+
+type ConsultaSindicalResolvida =
+  | { erro: string }
+  | {
+      // null quando as divisões pedidas não têm nenhuma subclasse na base: nada a consultar.
+      consulta: ConsultaBody | null;
+      filtros: { divisoes: string[]; mei: MeiFiltro };
+      simplesJoin: Prisma.Sql;
+    };
+
 // Compara hashes para que a comparação tenha tempo constante e tamanhos iguais.
 function sindicalKeyMatches(received: unknown): boolean {
   const expected = process.env.SINDICAL_API_KEY;
@@ -93,71 +129,105 @@ function telefoneDigitos(ddd: string | null, numero: string | null): string | nu
   return d && n ? `${d}${n}` : null;
 }
 
+/**
+ * Valida o corpo de contagem/exportação e o traduz em um filtro de consulta. Compartilhado
+ * pelas duas rotas para que o arquivo exportado cubra exatamente o que a contagem anunciou.
+ * Faz uma consulta ao banco apenas para expandir divisões em subclasses (depois de validar tudo).
+ */
+async function resolverConsultaSindical(body: ContagemBody): Promise<ConsultaSindicalResolvida> {
+  if (!body || typeof body !== 'object') return { erro: 'Corpo da requisição inválido.' };
+  if (body.situacao !== 'ativa' && body.situacao !== 'todas') {
+    return { erro: 'Campo "situacao" deve ser "ativa" ou "todas".' };
+  }
+
+  const mei: MeiFiltro = body.mei ?? 'todos';
+  const divisoes = body.divisoes ?? [];
+  const divisoesErr = validateDivisoes(divisoes);
+  if (divisoesErr) return { erro: divisoesErr };
+
+  const cnaesAvulsos = body.cnaes ?? [];
+  if (!Array.isArray(cnaesAvulsos)) {
+    return { erro: 'Campo "cnaes" deve conter ao menos um código CNAE.' };
+  }
+  if (cnaesAvulsos.length === 0 && divisoes.length === 0) {
+    return { erro: 'Informe ao menos um CNAE ou uma divisão.' };
+  }
+
+  // Valida tudo antes de tocar no banco; com só divisões, o placeholder satisfaz a regra "ao menos um CNAE".
+  const err = validateBody({
+    cnaes: cnaesAvulsos.length > 0 ? cnaesAvulsos : [CNAE_PLACEHOLDER],
+    uf: body.uf,
+    municipios: body.municipios,
+    situacao: body.situacao,
+    mei,
+  });
+  if (err) return { erro: err };
+
+  // Eco dos filtros efetivamente aplicados, para o chamador gravar na consulta.
+  const filtros = { divisoes: [...divisoes].sort(), mei };
+
+  // A divisão é o prefixo de 2 dígitos do CNAE principal; expande para as subclasses existentes.
+  let cnaes = [...new Set(cnaesAvulsos)];
+  if (divisoes.length > 0) {
+    const expandidos = await prisma.$queryRaw<{ codigo: string }[]>`
+      SELECT codigo FROM "Cnae" WHERE left(codigo, 2) = ANY(${divisoes})
+    `;
+    cnaes = [...new Set([...cnaes, ...expandidos.map((r) => r.codigo)])];
+  }
+  if (cnaes.length === 0) return { consulta: null, filtros, simplesJoin: Prisma.empty };
+
+  const consulta: ConsultaBody = {
+    cnaes,
+    uf: body.uf,
+    municipios: body.municipios,
+    situacao: body.situacao,
+    mei,
+  };
+  // O filtro de MEI referencia o alias "s"; sem filtro, o join com Simples é custo à toa.
+  const simplesJoin =
+    mei === 'todos' ? Prisma.empty : Prisma.sql`LEFT JOIN "Simples" s ON s.cnpj_base = e.cnpj_base`;
+  return { consulta, filtros, simplesJoin };
+}
+
+/**
+ * Corpo do 400 quando a consulta passa do teto. Caminho raro: o total exato só é calculado
+ * aqui, para a mensagem (e o campo `total` que o sindical lê) trazerem o número real.
+ */
+async function erroAcimaDoTeto(
+  simplesJoin: Prisma.Sql,
+  where: Prisma.Sql,
+  fallbackTotal: number,
+): Promise<{ error: string; total: number }> {
+  const countRows = await prisma.$transaction(async (tx) => {
+    await tx.$executeRaw`SET LOCAL work_mem = '4MB'`;
+    return tx.$queryRaw<{ total: number }[]>`
+      SELECT COUNT(*)::int AS total
+      FROM "Estabelecimento" e
+      ${simplesJoin}
+      ${where}
+    `;
+  });
+  const total = countRows[0]?.total ?? fallbackTotal;
+  return {
+    error: `A consulta retornou ${total.toLocaleString('pt-BR')} registros. Limite máximo é ${MAX_EXPORT_ROWS.toLocaleString('pt-BR')}. Refine os filtros para continuar.`,
+    total,
+  };
+}
+
 export async function integracaoSindicalRoutes(app: FastifyInstance) {
   // ─── POST /integracao/sindical/contagem ─────────────────────────────────────
   app.post<{ Body: ContagemBody }>(
     '/integracao/sindical/contagem',
     { preHandler: [requireSindicalKey] },
     async (request, reply) => {
-      const body = request.body;
-      if (!body || typeof body !== 'object') {
-        return reply.status(400).send({ error: 'Corpo da requisição inválido.' });
-      }
-      if (body.situacao !== 'ativa' && body.situacao !== 'todas') {
-        return reply.status(400).send({ error: 'Campo "situacao" deve ser "ativa" ou "todas".' });
-      }
+      const resolvida = await resolverConsultaSindical(request.body);
+      if ('erro' in resolvida) return reply.status(400).send({ error: resolvida.erro });
 
-      const mei: MeiFiltro = body.mei ?? 'todos';
-      const divisoes = body.divisoes ?? [];
-      const divisoesErr = validateDivisoes(divisoes);
-      if (divisoesErr) return reply.status(400).send({ error: divisoesErr });
-
-      const cnaesAvulsos = body.cnaes ?? [];
-      if (!Array.isArray(cnaesAvulsos)) {
-        return reply.status(400).send({ error: 'Campo "cnaes" deve conter ao menos um código CNAE.' });
-      }
-      if (cnaesAvulsos.length === 0 && divisoes.length === 0) {
-        return reply.status(400).send({ error: 'Informe ao menos um CNAE ou uma divisão.' });
-      }
-
-      // Valida tudo antes de tocar no banco; com só divisões, o placeholder satisfaz a regra "ao menos um CNAE".
-      const err = validateBody({
-        cnaes: cnaesAvulsos.length > 0 ? cnaesAvulsos : [CNAE_PLACEHOLDER],
-        uf: body.uf,
-        municipios: body.municipios,
-        situacao: body.situacao,
-        mei,
-      });
-      if (err) return reply.status(400).send({ error: err });
-
-      // Eco dos filtros efetivamente aplicados, para o chamador gravar na consulta.
-      const filtros = { divisoes: [...divisoes].sort(), mei };
+      const { consulta, filtros, simplesJoin } = resolvida;
       const base = await getBaseStatus();
-
-      // A divisão é o prefixo de 2 dígitos do CNAE principal; expande para as subclasses existentes.
-      let cnaes = [...new Set(cnaesAvulsos)];
-      if (divisoes.length > 0) {
-        const expandidos = await prisma.$queryRaw<{ codigo: string }[]>`
-          SELECT codigo FROM "Cnae" WHERE left(codigo, 2) = ANY(${divisoes})
-        `;
-        cnaes = [...new Set([...cnaes, ...expandidos.map((r) => r.codigo)])];
-      }
       // Divisão sem nenhuma subclasse na base: nada a contar.
-      if (cnaes.length === 0) {
-        return { baseMes: base.month, itens: [], filtros };
-      }
-
-      const consulta: ConsultaBody = {
-        cnaes,
-        uf: body.uf,
-        municipios: body.municipios,
-        situacao: body.situacao,
-        mei,
-      };
+      if (!consulta) return { baseMes: base.month, itens: [], filtros };
       const where = buildConsultaWhere(consulta);
-      // O filtro de MEI referencia o alias "s"; sem filtro, o join com Simples é custo à toa.
-      const simplesJoin =
-        mei === 'todos' ? Prisma.empty : Prisma.sql`LEFT JOIN "Simples" s ON s.cnpj_base = e.cnpj_base`;
 
       // Uma única varredura: antes um COUNT e o SELECT repetiam o mesmo filtro caro (70 CNAEs em
       // um município levavam ~70 s e estouravam os timeouts de quem chama). O LIMIT +1 só serve
@@ -177,22 +247,7 @@ export async function integracaoSindicalRoutes(app: FastifyInstance) {
       });
 
       if (rows.length > MAX_EXPORT_ROWS) {
-        // Caminho raro: o total exato só é calculado quando o limite estoura, para a mensagem
-        // (e o campo `total` que o sindical lê) continuarem com o número real.
-        const countRows = await prisma.$transaction(async (tx) => {
-          await tx.$executeRaw`SET LOCAL work_mem = '4MB'`;
-          return tx.$queryRaw<{ total: number }[]>`
-            SELECT COUNT(*)::int AS total
-            FROM "Estabelecimento" e
-            ${simplesJoin}
-            ${where}
-          `;
-        });
-        const total = countRows[0]?.total ?? rows.length;
-        return reply.status(400).send({
-          error: `A consulta retornou ${total.toLocaleString('pt-BR')} registros. Limite máximo é ${MAX_EXPORT_ROWS.toLocaleString('pt-BR')}. Refine os filtros para continuar.`,
-          total,
-        });
+        return reply.status(400).send(await erroAcimaDoTeto(simplesJoin, where, rows.length));
       }
 
       return {
@@ -201,6 +256,88 @@ export async function integracaoSindicalRoutes(app: FastifyInstance) {
           cnpj: r.cnpj,
           municipio: r.municipio,
           municipioNome: r.municipio_nome,
+        })),
+        filtros,
+      };
+    },
+  );
+
+  // ─── POST /integracao/sindical/exportar ─────────────────────────────────────
+  // Dados completos das empresas de uma consulta salva, para o sindical montar a planilha.
+  // Mesmo filtro e mesmo teto da contagem; sem sócios nem dados de porte, e sem cobrança de créditos.
+  app.post<{ Body: ContagemBody }>(
+    '/integracao/sindical/exportar',
+    { preHandler: [requireSindicalKey] },
+    async (request, reply) => {
+      const resolvida = await resolverConsultaSindical(request.body);
+      if ('erro' in resolvida) return reply.status(400).send({ error: resolvida.erro });
+
+      const { consulta, filtros } = resolvida;
+      const base = await getBaseStatus();
+      if (!consulta) return { baseMes: base.month, itens: [], filtros };
+      const where = buildConsultaWhere(consulta);
+      // opcao_mei é uma coluna da resposta, então o join com Simples é sempre necessário.
+      const simplesJoin = Prisma.sql`LEFT JOIN "Simples" s ON s.cnpj_base = e.cnpj_base`;
+
+      const rows = await prisma.$transaction(async (tx) => {
+        await tx.$executeRaw`SET LOCAL work_mem = '4MB'`;
+        return tx.$queryRaw<ExportarRow[]>`
+          SELECT e.cnpj_base || e.cnpj_ordem || e.cnpj_dv AS cnpj,
+                 emp.razao_social, e.nome_fantasia,
+                 e.identificador_matriz_filial,
+                 e.situacao_cadastral,
+                 e.data_inicio_atividade,
+                 e.cnae_fiscal_principal AS cnae_codigo,
+                 cn.descricao AS cnae_descricao,
+                 s.opcao_mei,
+                 e.uf, e.municipio,
+                 m.descricao AS municipio_nome,
+                 e.tipo_logradouro, e.logradouro, e.numero, e.complemento,
+                 e.bairro, e.cep,
+                 e.ddd1, e.telefone1, e.ddd2, e.telefone2,
+                 e.correio_eletronico
+          FROM "Estabelecimento" e
+          LEFT JOIN "Empresa" emp ON emp.cnpj_base = e.cnpj_base
+          ${simplesJoin}
+          LEFT JOIN "Municipio" m ON m.codigo = e.municipio
+          LEFT JOIN "Cnae" cn ON cn.codigo = e.cnae_fiscal_principal
+          ${where}
+          ORDER BY emp.razao_social
+          LIMIT ${MAX_EXPORT_ROWS + 1}
+        `;
+      });
+
+      if (rows.length > MAX_EXPORT_ROWS) {
+        return reply.status(400).send(await erroAcimaDoTeto(simplesJoin, where, rows.length));
+      }
+
+      return {
+        baseMes: base.month,
+        itens: rows.map((r) => ({
+          cnpj: r.cnpj,
+          razaoSocial: r.razao_social?.trim() ?? '',
+          nomeFantasia: r.nome_fantasia?.trim() || null,
+          matrizFilial:
+            r.identificador_matriz_filial === '1' ? 'Matriz' : r.identificador_matriz_filial === '2' ? 'Filial' : null,
+          situacao: r.situacao_cadastral ? (SITUACAO_MAP[r.situacao_cadastral] ?? r.situacao_cadastral) : null,
+          dataInicioAtividade: r.data_inicio_atividade,
+          cnaeCodigo: r.cnae_codigo,
+          cnaeDescricao: r.cnae_descricao,
+          mei: r.opcao_mei === 'S',
+          uf: r.uf,
+          municipio: r.municipio,
+          municipioNome: r.municipio_nome,
+          tipoLogradouro: r.tipo_logradouro,
+          logradouro: r.logradouro,
+          numero: r.numero,
+          complemento: r.complemento,
+          bairro: r.bairro,
+          cep: r.cep,
+          telefones: [
+            telefoneDigitos(r.ddd1, r.telefone1),
+            telefoneDigitos(r.ddd2, r.telefone2),
+          ].filter((t): t is string => t !== null),
+          email: r.correio_eletronico?.trim().toLowerCase() || null,
         })),
         filtros,
       };
