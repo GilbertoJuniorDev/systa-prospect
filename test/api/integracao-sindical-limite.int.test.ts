@@ -20,7 +20,7 @@ import { resetBaseStatusCache } from '../../src/lib/base-status';
 const KEY = 'chave-sindical-teste';
 const AUTH = { 'x-sindical-api-key': KEY };
 
-describe.skipIf(!url)('contagem: teto de registros (integração)', () => {
+describe.skipIf(!url)('contagem e exportar: teto de registros (integração)', () => {
   let app: FastifyInstance;
 
   async function insertEstab(base: string) {
@@ -55,33 +55,35 @@ describe.skipIf(!url)('contagem: teto de registros (integração)', () => {
     await prisma.$disconnect();
   });
 
-  const contagem = () =>
+  const consultar = (rota: 'contagem' | 'exportar') =>
     app.inject({
       method: 'POST',
-      url: '/integracao/sindical/contagem',
+      url: `/integracao/sindical/${rota}`,
       headers: AUTH,
       payload: { cnaes: ['0111301'], uf: 'SP', municipios: ['7107'], situacao: 'ativa' },
     });
 
-  it('no teto exato responde 200 com todos os itens', async () => {
-    await insertEstab('30000001');
-    await insertEstab('30000002');
+  describe.each(['contagem', 'exportar'] as const)('%s', (rota) => {
+    it('no teto exato responde 200 com todos os itens', async () => {
+      await insertEstab('30000001');
+      await insertEstab('30000002');
 
-    const res = await contagem();
+      const res = await consultar(rota);
 
-    expect(res.statusCode).toBe(200);
-    expect(res.json().itens).toHaveLength(2);
-  });
+      expect(res.statusCode).toBe(200);
+      expect(res.json().itens).toHaveLength(2);
+    });
 
-  it('acima do teto responde 400 com o total real (não o corte do LIMIT)', async () => {
-    for (const base of ['30000001', '30000002', '30000003', '30000004', '30000005']) {
-      await insertEstab(base);
-    }
+    it('acima do teto responde 400 com o total real (não o corte do LIMIT)', async () => {
+      for (const base of ['30000001', '30000002', '30000003', '30000004', '30000005']) {
+        await insertEstab(base);
+      }
 
-    const res = await contagem();
+      const res = await consultar(rota);
 
-    expect(res.statusCode).toBe(400);
-    expect(res.json().total).toBe(5);
-    expect(res.json().error).toContain('Limite máximo');
+      expect(res.statusCode).toBe(400);
+      expect(res.json().total).toBe(5);
+      expect(res.json().error).toContain('Limite máximo');
+    });
   });
 });

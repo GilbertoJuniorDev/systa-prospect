@@ -40,7 +40,11 @@ describe('rotas de integração do sindical (validação, sem banco)', () => {
   const post = (url: string, payload: unknown, headers: Record<string, string> = AUTH) =>
     app.inject({ method: 'POST', url, headers, payload: payload as object });
 
-  describe.each(['/integracao/sindical/contagem', '/integracao/sindical/empresas'])('%s', (url) => {
+  describe.each([
+    '/integracao/sindical/contagem',
+    '/integracao/sindical/exportar',
+    '/integracao/sindical/empresas',
+  ])('%s', (url) => {
     it('sem x-sindical-api-key → 401', async () => {
       const res = await post(url, CONTAGEM, {});
       expect(res.statusCode).toBe(401);
@@ -208,6 +212,39 @@ describe('rotas de integração do sindical (validação, sem banco)', () => {
     });
   });
 
+  describe('POST /integracao/sindical/exportar (validação)', () => {
+    const URL = '/integracao/sindical/exportar';
+
+    it('situacao inválida → 400', async () => {
+      const res = await post(URL, { ...CONTAGEM, situacao: 'inativa' });
+      expect(res.statusCode).toBe(400);
+      expect(res.json().error).toContain('situacao');
+      expect(queryRaw).not.toHaveBeenCalled();
+      expect(transaction).not.toHaveBeenCalled();
+    });
+
+    it('sem CNAE nem divisão → 400', async () => {
+      const res = await post(URL, { ...CONTAGEM, cnaes: [], divisoes: [] });
+      expect(res.statusCode).toBe(400);
+      expect(res.json().error).toBe('Informe ao menos um CNAE ou uma divisão.');
+      expect(queryRaw).not.toHaveBeenCalled();
+      expect(transaction).not.toHaveBeenCalled();
+    });
+
+    it('divisão inválida → 400', async () => {
+      const res = await post(URL, { ...CONTAGEM, divisoes: ['04'] });
+      expect(res.statusCode).toBe(400);
+      expect(res.json().error).toContain('Divisão inválida');
+      expect(queryRaw).not.toHaveBeenCalled();
+      expect(transaction).not.toHaveBeenCalled();
+    });
+
+    it('sem body → 400', async () => {
+      const res = await app.inject({ method: 'POST', url: URL, headers: AUTH });
+      expect(res.statusCode).toBe(400);
+    });
+  });
+
   it('contagem sem body → 400', async () => {
     const res = await app.inject({ method: 'POST', url: '/integracao/sindical/contagem', headers: AUTH });
     expect(res.statusCode).toBe(400);
@@ -235,6 +272,7 @@ describe('rotas de integração do sindical (validação, sem banco)', () => {
 
   it('isReceitaRoute cobre as rotas de integração (503 em manutenção)', () => {
     expect(isReceitaRoute('/integracao/sindical/contagem')).toBe(true);
+    expect(isReceitaRoute('/integracao/sindical/exportar')).toBe(true);
     expect(isReceitaRoute('/integracao/sindical/empresas')).toBe(true);
     expect(isReceitaRoute('/integracao/sindical/cnaes')).toBe(true);
     expect(isReceitaRoute('/integracao/outra')).toBe(false);
