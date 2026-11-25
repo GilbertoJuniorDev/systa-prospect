@@ -28,6 +28,12 @@ const ESTABELECIMENTO = {
   cnae_fiscal_principal: '4711302',
   cnae_principal_descricao: 'Comércio varejista de mercadorias em geral',
   cnae_fiscal_secundaria: '4712100,4721102',
+  tipo_logradouro: 'RUA',
+  logradouro: 'DAS FLORES',
+  numero: '120',
+  complemento: 'SALA 2',
+  bairro: 'CENTRO',
+  cep: '45000100',
   uf: 'BA',
   municipio_codigo: '3503',
   municipio_nome: 'VITORIA DA CONQUISTA',
@@ -116,6 +122,14 @@ describe('GET /integracao/sindical/cnpj/:cnpj', () => {
       cnaesSecundarios: SECUNDARIOS,
       municipio: { codigo: '3503', nome: 'VITORIA DA CONQUISTA' },
       uf: 'BA',
+      endereco: {
+        tipoLogradouro: 'RUA',
+        logradouro: 'DAS FLORES',
+        numero: '120',
+        complemento: 'SALA 2',
+        bairro: 'CENTRO',
+        cep: '45000-100',
+      },
       socios: [
         {
           tipo: 'pessoa_fisica',
