@@ -5,6 +5,7 @@ import { prisma } from '../lib/prisma';
 import { getBaseStatus } from '../lib/base-status';
 import { CNAE_DIVISOES, CODIGOS_DIVISAO } from '../lib/cnae-divisoes';
 import { SITUACAO_MAP } from '../lib/formatters';
+import { buscarCnpjCompleto } from '../services/cnpj-completo';
 import { MAX_EXPORT_ROWS, buildConsultaWhere, validateBody, type ConsultaBody } from './consulta';
 
 // Rotas máquina-a-máquina para o systa-sindical. Além do x-internal-api-key (hook global
@@ -13,6 +14,13 @@ import { MAX_EXPORT_ROWS, buildConsultaWhere, validateBody, type ConsultaBody } 
 
 const MAX_CNPJS_POR_LOTE = 500;
 const MAX_CNAES_DESCRICOES = 500;
+
+/** Identificador do sócio na Receita: 1 = pessoa jurídica, 2 = pessoa física, 3 = estrangeiro. */
+const TIPO_SOCIO: Record<string, 'pessoa_juridica' | 'pessoa_fisica' | 'estrangeiro'> = {
+  '1': 'pessoa_juridica',
+  '2': 'pessoa_fisica',
+  '3': 'estrangeiro',
+};
 
 type MeiFiltro = ConsultaBody['mei'];
 
@@ -476,6 +484,54 @@ export async function integracaoSindicalRoutes(app: FastifyInstance) {
             telefoneDigitos(r.ddd2, r.telefone2),
           ].filter((t): t is string => t !== null),
           email: r.correio_eletronico?.trim().toLowerCase() || null,
+        })),
+      };
+    },
+  );
+
+  // ─── GET /integracao/sindical/cnpj/:cnpj ────────────────────────────────────
+  // Ficha de um CNPJ para o sindical conferir elegibilidade (promoções): situação, CNAEs,
+  // município/UF, endereço e QSA. Mesmos dados de GET /cnpj/:cnpj, que exige login de usuário do prospect.
+  // O CPF dos sócios vai como a Receita publica (mascarado); o prospect não guarda o inteiro.
+  app.get<{ Params: { cnpj: string } }>(
+    '/integracao/sindical/cnpj/:cnpj',
+    { preHandler: [requireSindicalKey] },
+    async (request, reply) => {
+      const cnpj = request.params.cnpj.replace(/\D/g, '');
+      if (cnpj.length !== 14) {
+        return reply.status(400).send({ error: 'CNPJ deve conter 14 dígitos numéricos.' });
+      }
+
+      const ficha = await buscarCnpjCompleto(cnpj);
+      if (!ficha) return reply.status(404).send({ error: 'CNPJ não encontrado.' });
+
+      return {
+        cnpj,
+        razaoSocial: ficha.identificacao.razao_social,
+        situacaoCadastral: {
+          codigo: ficha.situacao_cadastral.codigo,
+          descricao: ficha.situacao_cadastral.descricao,
+        },
+        cnaePrincipal: ficha.cnae.principal,
+        cnaesSecundarios: ficha.cnae.secundarios,
+        municipio: {
+          codigo: ficha.endereco.municipio_codigo,
+          nome: ficha.endereco.municipio,
+        },
+        uf: ficha.endereco.uf,
+        endereco: {
+          tipoLogradouro: ficha.endereco.tipo_logradouro,
+          logradouro: ficha.endereco.logradouro,
+          numero: ficha.endereco.numero,
+          complemento: ficha.endereco.complemento,
+          bairro: ficha.endereco.bairro,
+          cep: ficha.endereco.cep,
+        },
+        socios: ficha.socios.map((s) => ({
+          tipo: TIPO_SOCIO[s.identificador_socio] ?? null,
+          nome: s.nome_socio,
+          documento: s.cnpj_cpf_socio,
+          qualificacao: s.qualificacao_socio,
         })),
       };
     },
