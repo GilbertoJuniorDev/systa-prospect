@@ -491,7 +491,7 @@ export async function integracaoSindicalRoutes(app: FastifyInstance) {
 
   // ─── GET /integracao/sindical/cnpj/:cnpj ────────────────────────────────────
   // Ficha de um CNPJ para o sindical conferir elegibilidade (promoções): situação, CNAEs,
-  // município/UF e QSA. Mesmos dados de GET /cnpj/:cnpj, que exige login de usuário do prospect.
+  // município/UF, endereço e QSA. Mesmos dados de GET /cnpj/:cnpj, que exige login de usuário do prospect.
   // O CPF dos sócios vai como a Receita publica (mascarado); o prospect não guarda o inteiro.
   app.get<{ Params: { cnpj: string } }>(
     '/integracao/sindical/cnpj/:cnpj',
@@ -519,6 +519,14 @@ export async function integracaoSindicalRoutes(app: FastifyInstance) {
           nome: ficha.endereco.municipio,
         },
         uf: ficha.endereco.uf,
+        endereco: {
+          tipoLogradouro: ficha.endereco.tipo_logradouro,
+          logradouro: ficha.endereco.logradouro,
+          numero: ficha.endereco.numero,
+          complemento: ficha.endereco.complemento,
+          bairro: ficha.endereco.bairro,
+          cep: ficha.endereco.cep,
+        },
         socios: ficha.socios.map((s) => ({
           tipo: TIPO_SOCIO[s.identificador_socio] ?? null,
           nome: s.nome_socio,
